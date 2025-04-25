@@ -336,16 +336,109 @@ def _analyze_directory(
         
     logger.info(f"Found {len(files)} supported files in {directory}")
     
-    # Process each file
-    for file_path in files:
-        _analyze_file(
-            file_path=file_path,
-            output_path=output_path,
-            output_format=output_format,
-            entities=entities,
-            threshold=threshold,
-            force_ocr=force_ocr
-        )
+    # For directory analysis with an output file, we'll create a single summary file
+    if output_path is not None:
+        if os.path.isdir(output_path):
+            # If output_path is a directory, create a summary file in that directory
+            output_dir = output_path
+            output_file = os.path.join(output_dir, f"pii_analysis_summary_{os.path.basename(directory)}")
+            if output_format == "json":
+                output_file += ".json"
+            else:
+                output_file += ".txt"
+        else:
+            # Use the provided output path directly
+            output_file = output_path
+        
+        # Initialize the output file
+        if output_format == "json":
+            # For JSON, we'll build a list of results and write at the end
+            all_results = []
+        else:  # text format
+            # For text, open file and write header
+            with open(output_file, "w") as f:
+                f.write(f"PII Analysis Summary for Directory: {directory}\n")
+                f.write(f"Files analyzed: {len(files)}\n")
+                f.write(f"Analysis timestamp: {os.path.basename(directory)}\n")
+                f.write("-" * 80 + "\n\n")
+        
+        # Process each file and append results to the output file
+        total_entities = 0
+        for idx, file_path in enumerate(files):
+            try:
+                # Extract text
+                extractor = ExtractorFactory()
+                text, metadata = extractor.extract_text(file_path, force_ocr=force_ocr)
+                
+                if not text:
+                    logger.warning(f"No text extracted from {file_path}")
+                    continue
+                
+                # Analyze text for PII
+                analyzer = PresidioAnalyzer(score_threshold=threshold)
+                detected_entities = analyzer.analyze_text(
+                    text=text,
+                    entities=entities
+                )
+                
+                total_entities += len(detected_entities)
+                
+                # Build results
+                results = {
+                    "file_path": file_path,
+                    "entities": detected_entities,
+                    "metadata": metadata,
+                    "text_length": len(text)
+                }
+                
+                # Append to output
+                if output_format == "json":
+                    all_results.append(results)
+                else:  # text format
+                    with open(output_file, "a") as f:
+                        f.write(f"File {idx+1}/{len(files)}: {file_path}\n")
+                        f.write(f"Text length: {len(text)}\n")
+                        f.write(f"Extraction method: {metadata.get('extraction_method', 'unknown')}\n")
+                        f.write(f"Entities found: {len(detected_entities)}\n\n")
+                        
+                        for entity in detected_entities:
+                            f.write(f"Type: {entity['entity_type']}\n")
+                            f.write(f"Text: {entity['text']}\n")
+                            f.write(f"Score: {entity['score']:.2f}\n")
+                            f.write(f"Position: {entity['start']}-{entity['end']}\n\n")
+                        
+                        f.write("-" * 40 + "\n\n")
+                
+                logger.info(f"Analyzed file {idx+1}/{len(files)}: {file_path} - Found {len(detected_entities)} entities")
+                
+            except Exception as e:
+                logger.error(f"Error analyzing {file_path}: {e}")
+        
+        # Write final output for JSON format
+        if output_format == "json":
+            with open(output_file, "w") as f:
+                summary = {
+                    "directory": directory,
+                    "files_analyzed": len(files),
+                    "total_entities_found": total_entities,
+                    "results": all_results
+                }
+                json.dump(summary, f, indent=2)
+        
+        logger.info(f"Analysis summary written to {output_file}")
+        logger.info(f"Total PII entities found: {total_entities}")
+    
+    # If no output path specified, process each file individually
+    else:
+        for file_path in files:
+            _analyze_file(
+                file_path=file_path,
+                output_path=None,
+                output_format=output_format,
+                entities=entities,
+                threshold=threshold,
+                force_ocr=force_ocr
+            )
 
 def _redact_file(
     file_path: str, 
