@@ -364,6 +364,8 @@ def _analyze_directory(
         
         # Process each file and append results to the output file
         total_entities = 0
+        entity_type_counts = {}  # To track counts by entity type
+        
         for idx, file_path in enumerate(files):
             try:
                 # Extract text
@@ -382,6 +384,11 @@ def _analyze_directory(
                 )
                 
                 total_entities += len(detected_entities)
+                
+                # Count entity types
+                for entity in detected_entities:
+                    entity_type = entity['entity_type']
+                    entity_type_counts[entity_type] = entity_type_counts.get(entity_type, 0) + 1
                 
                 # Build results
                 results = {
@@ -421,9 +428,28 @@ def _analyze_directory(
                     "directory": directory,
                     "files_analyzed": len(files),
                     "total_entities_found": total_entities,
+                    "entity_type_breakdown": entity_type_counts,
                     "results": all_results
                 }
                 json.dump(summary, f, indent=2)
+        else:
+            # Add summary section at the end of the text file
+            with open(output_file, "a") as f:
+                f.write("=" * 80 + "\n")
+                f.write("FINAL ANALYSIS SUMMARY\n")
+                f.write("=" * 80 + "\n\n")
+                f.write(f"Total files analyzed: {len(files)}\n")
+                f.write(f"Total PII entities found: {total_entities}\n\n")
+                f.write("Breakdown by entity type:\n")
+                
+                # Sort by count (descending)
+                sorted_types = sorted(entity_type_counts.items(), key=lambda x: x[1], reverse=True)
+                
+                for entity_type, count in sorted_types:
+                    f.write(f"- {entity_type}: {count} occurrences\n")
+                
+                f.write("\n")
+                f.write("Analysis completed successfully.\n")
         
         logger.info(f"Analysis summary written to {output_file}")
         logger.info(f"Total PII entities found: {total_entities}")
