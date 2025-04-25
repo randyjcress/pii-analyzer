@@ -1,0 +1,25 @@
+version: '3'
+
+services:
+  tika:
+    image: apache/tika:2.9.1.0
+    ports:
+      - "9998:9998"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:9998/tika"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  pii-analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+    depends_on:
+      - tika
+    environment:
+      - TIKA_SERVER_ENDPOINT=http://tika:9998
+    command: ["python", "-m", "src.cli", "serve"] 
