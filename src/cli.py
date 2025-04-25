@@ -29,7 +29,7 @@ def cli(verbose: bool, log_file: Optional[str]):
     log_level = "DEBUG" if verbose else "INFO"
     
     if log_file:
-        logger = setup_logger(
+        setup_logger(
             "pii_analyzer", 
             log_file=log_file, 
             level=getattr(sys.modules["logging"], log_level)
@@ -259,7 +259,28 @@ def _analyze_file(
             "text_length": len(text)
         }
         
-        # Output results
+        # If no output path is specified, just print to stdout instead of writing to a file
+        if output_path is None:
+            if output_format == "json":
+                print(json.dumps(results, indent=2))
+            else:
+                print(f"File: {file_path}")
+                print(f"Text length: {len(text)}")
+                print(f"Extraction method: {metadata.get('extraction_method', 'unknown')}")
+                print(f"Entities found: {len(detected_entities)}")
+                print()
+                
+                for entity in detected_entities:
+                    print(f"Type: {entity['entity_type']}")
+                    print(f"Text: {entity['text']}")
+                    print(f"Score: {entity['score']:.2f}")
+                    print(f"Position: {entity['start']}-{entity['end']}")
+                    print()
+            
+            logger.info(f"Analysis results printed to stdout")
+            return
+        
+        # Output to file
         if output_format == "json":
             output_file = get_output_path(file_path, output_path, "json")
             with open(output_file, "w") as f:
@@ -387,7 +408,19 @@ def _redact_file(
             "extraction_metadata": metadata
         }
         
-        # Output results
+        # If no output path is specified, print to stdout
+        if output_path is None:
+            if output_format == "json":
+                results["original_text"] = text
+                results["anonymized_text"] = anonymized_text
+                print(json.dumps(results, indent=2))
+            else:
+                print(anonymized_text)
+                
+            logger.info(f"Redaction results printed to stdout")
+            return
+        
+        # Output results to file
         if output_format == "json":
             # Output structured JSON with original and anonymized text
             output_file = get_output_path(file_path, output_path, "json")

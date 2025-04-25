@@ -40,8 +40,16 @@ class PresidioAnalyzer:
             model_name: Spacy model name
         """
         # Create NLP engine with spaCy
-        spacy_nlp = spacy.load(model_name)
-        provider = NlpEngineProvider(nlp_engine_name="spacy", nlp_engine=spacy_nlp)
+        # Define the NLP engine configuration
+        nlp_configuration = {
+            "nlp_engine_name": "spacy",
+            "models": [
+                {"lang_code": self.language, "model_name": model_name}
+            ]
+        }
+        
+        # Create the NLP engine using the configuration
+        provider = NlpEngineProvider(nlp_configuration=nlp_configuration)
         nlp_engine = provider.create_engine()
         
         # Set up recognizer registry and analyzer engines
@@ -57,8 +65,8 @@ class PresidioAnalyzer:
             analyzer_engine=self.analyzer
         )
         
-        # Log available entity types
-        supported_entities = registry.get_supported_entities()
+        # Get supported entities from the analyzer instead
+        supported_entities = self.analyzer.get_supported_entities()
         logger.info(f"Supported entity types: {', '.join(supported_entities)}")
         
     def analyze_text(self, 
