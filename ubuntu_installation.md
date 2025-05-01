@@ -16,10 +16,43 @@ This is a PII analysis system built on:
 - 8GB+ RAM recommended (Spacy models and OCR processing can be memory intensive)
 - Sufficient disk space for document processing
 
-### System Packages
+### Installing Python 3.11 on Ubuntu
+
+Python 3.11 is not available in the default repositories for many Ubuntu versions. Follow these steps to install it:
+
 ```bash
+# Update package lists
 sudo apt update
-sudo apt install -y tesseract-ocr libtesseract-dev poppler-utils docker.io docker-compose git python3.11-dev python3.11-venv
+
+# Install required dependencies
+sudo apt install -y software-properties-common
+
+# Add deadsnakes PPA repository for Python 3.11
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+
+# Update package lists again to include the new repository
+sudo apt update
+
+# Install Python 3.11 and development headers
+sudo apt install -y python3.11 python3.11-dev python3.11-venv
+```
+
+### Installing Other System Packages
+
+```bash
+# Install Tesseract OCR, Docker, and other dependencies
+sudo apt install -y tesseract-ocr libtesseract-dev poppler-utils 
+
+# Install Docker if not already installed
+sudo apt install -y docker.io docker-compose git
+
+# Make sure Docker service is running
+sudo systemctl start docker
+sudo systemctl enable docker
+
+# Optional: Add your user to the docker group to run Docker without sudo
+sudo usermod -aG docker $USER
+# Note: You'll need to log out and back in for this to take effect
 ```
 
 ## Installation Steps
