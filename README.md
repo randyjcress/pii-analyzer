@@ -99,18 +99,24 @@ python pii_analyzer.py -i path/to/file.pdf -o results.json
 ### Batch Processing
 
 ```bash
+# Now uses parallel processing by default for directories
 pii-analyzer -i path/to/directory -o output.json
+
+# Force sequential processing if needed
+pii-analyzer -i path/to/directory -o output.json --sequential
 ```
 
-### Parallel Batch Processing
+### Explicitly Using Parallel Processing
 
-For processing large collections of documents in parallel:
+If you need more control over the parallel processing:
 
 ```bash
+# Explicitly specify parallel processing with custom worker count
+pii-analyzer-parallel -i path/to/directory -o output.json --workers 8
+
+# Or using the script directly
 python pii_analyzer_parallel.py -i path/to/directory -o output.json --workers 8
 ```
-
-The parallel processor automatically determines the optimal number of worker threads based on your system resources, but you can specify a specific number with the `--workers` parameter.
 
 ### NC Breach Analysis
 

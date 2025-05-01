@@ -108,13 +108,17 @@ python pii_analyzer.py -i path/to/file.pdf -o results.json -t 0.7
 
 ### Batch Processing
 ```bash
+# Now uses parallel processing by default for directories
 pii-analyzer -i path/to/directory -o output_directory.json -t 0.7
+
+# Force sequential processing if needed
+pii-analyzer -i path/to/directory -o output_directory.json -t 0.7 --sequential
 ```
 
-### Parallel Batch Processing
-For processing large document collections more efficiently:
+### Advanced Parallel Processing
+For finer control of parallel processing on large document collections:
 ```bash
-# Using the installed command
+# Using the installed command with specific worker count
 pii-analyzer-parallel -i path/to/directory -o output_directory.json --workers 8
 
 # OR using the Python script directly
@@ -187,10 +191,11 @@ Options:
   --max-pages         Maximum pages per PDF
   --sample            Analyze only a sample of files
   --debug             Show detailed debug information
+  --sequential        Force sequential processing for directories
   --help              Show this help message
 ```
 
-For the parallel processor, you have the additional option:
+For fine-grained control over parallel processing:
 ```
 pii-analyzer-parallel --help
 

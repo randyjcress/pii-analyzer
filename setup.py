@@ -10,7 +10,7 @@ with open("requirements.txt", "r") as fh:
 
 setup(
     name="pii-analyzer",
-    version="1.0.0",
+    version="1.1.0",
     author="Randy J. Cress",
     author_email="username@example.com",
     description="A tool for detecting and analyzing personally identifiable information in documents",
