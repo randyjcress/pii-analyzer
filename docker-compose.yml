@@ -11,15 +11,5 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
-
-  pii-analyzer:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    volumes:
-      - .:/app
-    depends_on:
-      - tika
     environment:
-      - TIKA_SERVER_ENDPOINT=http://tika:9998
-    command: ["python", "-m", "src.cli", "serve"] 
+      - JAVA_OPTS=-Xmx2g  # Allocate 2GB of memory to Tika 
