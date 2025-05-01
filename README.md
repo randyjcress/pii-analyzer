@@ -9,6 +9,8 @@ A robust, extensible pipeline for extracting text from various file formats, det
 - PII detection using Microsoft Presidio
 - Anonymization of detected PII
 - Command-line interface for processing files individually or in batch
+- Enhanced CLI with better handling for DOCX files
+- NC breach notification analysis for compliance
 
 ## Architecture
 
@@ -25,6 +27,8 @@ File Input → Text Extraction → PII Analysis → Anonymization → Output
 - Tesseract OCR
 
 ## Installation
+
+For detailed installation instructions on Ubuntu, see [ubuntu_installation.md](ubuntu_installation.md).
 
 ### 1. Clone the repository
 
@@ -52,7 +56,15 @@ pip install -r requirements.txt
 python -m spacy download en_core_web_lg
 ```
 
-### 5. Start Apache Tika Docker container
+### 5. Configure environment variables
+
+```bash
+cp .env-template .env
+```
+
+Edit the `.env` file to adjust settings as needed.
+
+### 6. Start Apache Tika Docker container
 
 ```bash
 docker-compose up -d
@@ -66,10 +78,24 @@ docker-compose up -d
 python -m src.cli analyze --input path/to/file.pdf --output results.json
 ```
 
+### Enhanced CLI (Better DOCX Support)
+
+```bash
+python fix_enhanced_cli.py -i path/to/file.docx -o results.json
+```
+
 ### Batch Processing
 
 ```bash
-python -m src.cli analyze --input path/to/directory --output output_directory
+python fix_enhanced_cli.py -i path/to/directory -o output.json
+```
+
+### NC Breach Analysis
+
+After generating analysis results:
+
+```bash
+python strict_nc_breach_pii.py analysis_results.json
 ```
 
 ### Redaction
@@ -91,21 +117,9 @@ python -m src.cli redact --input path/to/file.pdf --output redacted.txt
 --verbose, -v        Increase output verbosity
 ```
 
-## Examples
-
-### Analyzing a PDF file
-
-```bash
-python -m src.cli analyze -i documents/contract.pdf -o results.json -e PERSON,EMAIL_ADDRESS,PHONE_NUMBER
-```
-
-### Redacting information in a batch of files
-
-```bash
-python -m src.cli redact -i documents/ -o redacted/ -a mask
-```
-
 ## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and contribution guidelines.
 
 ### Project Structure
 
@@ -119,20 +133,10 @@ pii-analysis/
 │   └── cli.py           # Command-line interface
 ├── tests/               # Test modules
 ├── sample_files/        # Sample files for testing
+├── fix_enhanced_cli.py  # Enhanced CLI with better DOCX support
+├── strict_nc_breach_pii.py # NC breach notification analysis
 ├── requirements.txt     # Project dependencies
 └── README.md            # Project documentation
-```
-
-### Running Tests
-
-```bash
-pytest
-```
-
-### Docker Deployment
-
-```bash
-docker-compose up -d
 ```
 
 ## License

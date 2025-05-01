@@ -12,7 +12,10 @@ class ExtractorFactory:
                  tika_server: Optional[str] = None,
                  tesseract_cmd: Optional[str] = None,
                  ocr_lang: str = 'eng',
-                 ocr_dpi: int = 300):
+                 ocr_dpi: int = 300,
+                 ocr_threads: int = 0,
+                 ocr_oem: int = 3,
+                 ocr_psm: int = 6):
         """Initialize extractor factory.
         
         Args:
@@ -20,12 +23,18 @@ class ExtractorFactory:
             tesseract_cmd: Path to tesseract executable
             ocr_lang: OCR language
             ocr_dpi: DPI for PDF rendering
+            ocr_threads: Number of threads for OCR processing (0=auto)
+            ocr_oem: OCR Engine Mode (3=default, 1=neural nets LSTM only)
+            ocr_psm: Page Segmentation Mode (6=default, 3=auto page segmentation)
         """
         self.tika_extractor = TikaExtractor(tika_server=tika_server)
         self.ocr_extractor = OCRExtractor(
             tesseract_cmd=tesseract_cmd,
             lang=ocr_lang,
-            dpi=ocr_dpi
+            dpi=ocr_dpi,
+            threads=ocr_threads,
+            oem=ocr_oem,
+            psm=ocr_psm
         )
         
     def get_extractor(self, file_path: str, force_ocr: bool = False) -> str:
@@ -59,13 +68,15 @@ class ExtractorFactory:
             raise ValueError(f"Unknown extraction method: {extraction_method}")
             
     def extract_text(self, 
-                     file_path: str, 
-                     force_ocr: bool = False) -> Tuple[str, Dict]:
+                    file_path: str, 
+                    force_ocr: bool = False,
+                    max_pages: Optional[int] = None) -> Tuple[str, Dict]:
         """Extract text from file using appropriate extractor.
         
         Args:
             file_path: Path to file
             force_ocr: Whether to force OCR extraction
+            max_pages: Maximum number of pages to process for PDFs (None=all)
             
         Returns:
             Tuple[str, Dict]: Extracted text and metadata
@@ -87,7 +98,7 @@ class ExtractorFactory:
                     return text, metadata
                 # Handle PDF files
                 else:
-                    text, metadata = self.ocr_extractor.extract_from_pdf(file_path)
+                    text, metadata = self.ocr_extractor.extract_from_pdf(file_path, max_pages=max_pages)
                     metadata['extraction_method'] = 'ocr'
                     return text, metadata
                     
@@ -97,7 +108,7 @@ class ExtractorFactory:
                 
                 if needs_ocr:
                     logger.info(f"Falling back to OCR for {file_path}")
-                    text, ocr_metadata = self.ocr_extractor.extract_from_pdf(file_path)
+                    text, ocr_metadata = self.ocr_extractor.extract_from_pdf(file_path, max_pages=max_pages)
                     metadata.update(ocr_metadata)
                     metadata['extraction_method'] = 'tika_with_ocr_fallback'
                 else:

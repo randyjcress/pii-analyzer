@@ -38,6 +38,15 @@ logs/
 *.swo
 .DS_Store
 
-# Project specific
-sample_files/
-output/ 
+# Environment variables - never commit actual .env files
+.env
+
+# Large data files and output
+docs/
+*_analysis.json
+*_results.json
+*_report*.json
+
+# Keep example and template files
+!sample_files/
+!.env-template 
