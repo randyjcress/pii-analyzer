@@ -10,6 +10,8 @@ A robust, extensible pipeline for extracting text from various file formats, det
 - Anonymization of detected PII
 - Command-line interface for processing files individually or in batch
 - Enhanced CLI with better handling for DOCX files
+- Multi-threaded processing for handling multiple files simultaneously
+- Intelligent thread allocation for OCR optimization
 - NC breach notification analysis for compliance
 
 ## Architecture
@@ -100,6 +102,16 @@ python pii_analyzer.py -i path/to/file.pdf -o results.json
 pii-analyzer -i path/to/directory -o output.json
 ```
 
+### Parallel Batch Processing
+
+For processing large collections of documents in parallel:
+
+```bash
+python pii_analyzer_parallel.py -i path/to/directory -o output.json --workers 8
+```
+
+The parallel processor automatically determines the optimal number of worker threads based on your system resources, but you can specify a specific number with the `--workers` parameter.
+
 ### NC Breach Analysis
 
 After generating analysis results:
@@ -129,7 +141,16 @@ python -m src.cli redact --input path/to/file.pdf --output redacted.txt
 --ocr-threads        Number of OCR threads (0=auto)
 --max-pages          Maximum pages per PDF
 --sample             Analyze only a sample of files
+--workers            Number of parallel worker threads (0=auto, parallel processor only)
 ```
+
+## Performance Optimization
+
+The PII Analyzer offers two levels of thread optimization:
+
+1. **OCR Thread Optimization**: Within the OCR extractor, threads are optimized based on file size, available memory, and CPU cores to efficiently process individual documents with multiple pages.
+
+2. **Parallel File Processing**: Using `pii_analyzer_parallel.py`, multiple files can be processed simultaneously, each with its own OCR thread optimization, significantly reducing processing time for large collections of documents.
 
 ## Development
 
@@ -148,6 +169,7 @@ pii-analysis/
 ├── tests/               # Test modules
 ├── sample_files/        # Sample files for testing
 ├── pii_analyzer.py      # Main entry point
+├── pii_analyzer_parallel.py  # Parallel processing entry point
 ├── fix_enhanced_cli.py  # Enhanced CLI implementation
 ├── strict_nc_breach_pii.py # NC breach notification analysis
 ├── setup.py            # Package installation configuration

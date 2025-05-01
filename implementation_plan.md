@@ -237,13 +237,40 @@ git commit -m "Final release preparation"
 git push origin main
 ```
 
+### Week 5: Performance Optimization and Extensions
+
+#### Day 1-3: OCR Performance Optimization
+- [x] Implement intelligent thread allocation for OCR processing
+- [x] Add system resource monitoring with psutil
+- [x] Optimize thread count based on file size and available resources
+- [x] Test OCR performance improvements on large documents
+
+```bash
+git add .
+git commit -m "Add OCR performance optimization with intelligent threading"
+git push origin main
+```
+
+#### Day 4-5: Multi-threaded File Processing
+- [x] Implement parallel processing for multiple files
+- [x] Create worker pool management based on system resources
+- [x] Add thread-safe result collection and progress tracking
+- [x] Update documentation for parallel processing features
+- [x] Test performance improvements with large document collections
+
+```bash
+git add .
+git commit -m "Add parallel file processing for improved performance"
+git push origin main
+```
+
 ## Dependencies
 
 - Python 3.11
 - Apache Tika (Docker container)
 - Microsoft Presidio (`presidio-analyzer`, `presidio-anonymizer`)
 - OCR Tools (`pdf2image`, `pytesseract`)
-- Support Libraries (`pillow`, `pandas`, `click`, etc.)
+- Support Libraries (`pillow`, `pandas`, `click`, `rich`, `psutil`, etc.)
 
 ## Deployment
 
@@ -257,5 +284,7 @@ Docker-based deployment with Docker Compose to manage:
 - Accurately identifies PII entities with configurable thresholds
 - Provides redaction capabilities with various anonymization options
 - Offers an intuitive CLI for single file and batch processing
+- Efficiently processes large collections of documents through parallel processing
+- Intelligently optimizes resource usage based on system capabilities
 - Maintains comprehensive logging and error handling
 - Has test coverage for all major components 

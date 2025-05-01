@@ -111,6 +111,17 @@ python pii_analyzer.py -i path/to/file.pdf -o results.json -t 0.7
 pii-analyzer -i path/to/directory -o output_directory.json -t 0.7
 ```
 
+### Parallel Batch Processing
+For processing large document collections more efficiently:
+```bash
+# Using the installed command
+pii-analyzer-parallel -i path/to/directory -o output_directory.json --workers 8
+
+# OR using the Python script directly
+python pii_analyzer_parallel.py -i path/to/directory -o output_directory.json --workers 8
+```
+The parallel processor automatically determines the optimal number of worker threads based on your system resources, but you can specify a specific number with the `--workers` parameter.
+
 ### NC Breach Specific Analysis 
 For applying NC breach notification rules, after running the full analysis:
 ```bash
@@ -130,8 +141,8 @@ To process the entire dataset, we recommend this approach:
    - Split into subdirectories if needed
    - Run the analysis on each batch:
    ```bash
-   pii-analyzer -i docs/batch1 -o batch1_results.json
-   pii-analyzer -i docs/batch2 -o batch2_results.json
+   pii-analyzer-parallel -i docs/batch1 -o batch1_results.json
+   pii-analyzer-parallel -i docs/batch2 -o batch2_results.json
    ```
 
 3. **Run the NC breach analysis on results**
@@ -144,6 +155,7 @@ To process the entire dataset, we recommend this approach:
 1. **Memory limitations**: For large files, especially PDFs with many pages:
    - Use the `--max-pages` option to limit pages processed
    - Increase swap space on the Ubuntu system if needed
+   - Adjust the worker count in parallel processing with `--workers` parameter
 
 2. **DOCX file processing errors**: The analyzer has improved error handling for DOCX files
 
@@ -178,6 +190,14 @@ Options:
   --help              Show this help message
 ```
 
+For the parallel processor, you have the additional option:
+```
+pii-analyzer-parallel --help
+
+Additional options:
+  --workers           Number of parallel worker threads (0=auto)
+```
+
 ## Code Structure
 - `src/` - Core functionality
   - `extractors/` - Text extraction from various file formats
@@ -186,6 +206,8 @@ Options:
   - `utils/` - Helper utilities
   - `cli.py` - Command-line interface
 - `fix_enhanced_cli.py` - Improved CLI with better error handling
+- `pii_analyzer.py` - Main entry point
+- `pii_analyzer_parallel.py` - Parallel processing entry point for multi-threaded file processing
 - `strict_nc_breach_pii.py` - NC breach notification analysis
 
 The system follows a pipeline architecture:

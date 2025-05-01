@@ -18,7 +18,7 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/randyjcress/pii-analyzer",
     packages=find_packages(),
-    py_modules=["pii_analyzer", "fix_enhanced_cli", "strict_nc_breach_pii", "extract_nc_breach_pii"],
+    py_modules=["pii_analyzer", "pii_analyzer_parallel", "fix_enhanced_cli", "strict_nc_breach_pii", "extract_nc_breach_pii"],
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.11",
@@ -30,6 +30,7 @@ setup(
     entry_points={
         "console_scripts": [
             "pii-analyzer=pii_analyzer:main",
+            "pii-analyzer-parallel=pii_analyzer_parallel:main",
         ],
     },
 ) 
