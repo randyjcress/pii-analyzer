@@ -69,10 +69,13 @@ sudo usermod -aG docker $USER
    source venv/bin/activate
    ```
 
-3. **Install Python dependencies**
+3. **Install the PII Analyzer package**
    ```bash
-   pip install --upgrade pip
-   pip install -r requirements.txt
+   # For development (allows editing the code)
+   pip install -e .
+   
+   # OR for standard installation
+   pip install .
    ```
 
 4. **Install spaCy language model**
@@ -80,7 +83,13 @@ sudo usermod -aG docker $USER
    python -m spacy download en_core_web_lg
    ```
 
-5. **Start Apache Tika service**
+5. **Configure environment variables**
+   ```bash
+   cp .env-template .env
+   # Edit the .env file if needed
+   ```
+
+6. **Start Apache Tika service**
    ```bash
    docker-compose up -d
    ```
@@ -90,12 +99,16 @@ sudo usermod -aG docker $USER
 
 ### Single File Analysis
 ```bash
-python -m src.cli analyze -i path/to/file.pdf -o results.json -t 0.7
+# Using the installed command
+pii-analyzer -i path/to/file.pdf -o results.json -t 0.7
+
+# OR using the Python script directly
+python pii_analyzer.py -i path/to/file.pdf -o results.json -t 0.7
 ```
 
 ### Batch Processing
 ```bash
-python -m src.cli analyze -i path/to/directory -o output_directory -t 0.7
+pii-analyzer -i path/to/directory -o output_directory.json -t 0.7
 ```
 
 ### NC Breach Specific Analysis 
@@ -104,27 +117,21 @@ For applying NC breach notification rules, after running the full analysis:
 python strict_nc_breach_pii.py full_analysis_results.json
 ```
 
-### Using the fixed enhanced CLI
-For processing large directories with better error handling (especially for DOCX files):
-```bash
-python fix_enhanced_cli.py -i path/to/directory -o full_results.json
-```
-
 ## Processing the Full Dataset
 
 To process the entire dataset, we recommend this approach:
 
 1. **Start with a small sample to verify everything works**
    ```bash
-   python fix_enhanced_cli.py -i docs -o sample_analysis.json --sample 50
+   pii-analyzer -i docs -o sample_analysis.json --sample 50
    ```
 
 2. **Process in batches if the dataset is large**
    - Split into subdirectories if needed
    - Run the analysis on each batch:
    ```bash
-   python fix_enhanced_cli.py -i docs/batch1 -o batch1_results.json
-   python fix_enhanced_cli.py -i docs/batch2 -o batch2_results.json
+   pii-analyzer -i docs/batch1 -o batch1_results.json
+   pii-analyzer -i docs/batch2 -o batch2_results.json
    ```
 
 3. **Run the NC breach analysis on results**
@@ -138,7 +145,7 @@ To process the entire dataset, we recommend this approach:
    - Use the `--max-pages` option to limit pages processed
    - Increase swap space on the Ubuntu system if needed
 
-2. **DOCX file processing errors**: The fixed CLI handles these better with improved error logging and recovery
+2. **DOCX file processing errors**: The analyzer has improved error handling for DOCX files
 
 3. **Apache Tika performance**: Ensure Tika has enough memory:
    ```bash
@@ -149,8 +156,27 @@ To process the entire dataset, we recommend this approach:
 
 4. **Tesseract OCR tuning**: If OCR is slow, adjust threads and DPI:
    ```bash
-   python fix_enhanced_cli.py -i docs -o results.json --ocr-threads 4 --ocr-dpi 200
+   pii-analyzer -i docs -o results.json --ocr-threads 4 --ocr-dpi 200
    ```
+
+## Full Command Options
+
+```
+pii-analyzer --help
+
+Options:
+  -i, --input         Input file or directory (required)
+  -o, --output        Output JSON file for results
+  -e, --entities      Comma-separated list of entities to detect
+  -t, --threshold     Confidence threshold (0-1, default: 0.7)
+  --ocr               Force OCR for text extraction
+  --ocr-dpi           DPI for OCR (default: 300)
+  --ocr-threads       Number of OCR threads (0=auto)
+  --max-pages         Maximum pages per PDF
+  --sample            Analyze only a sample of files
+  --debug             Show detailed debug information
+  --help              Show this help message
+```
 
 ## Code Structure
 - `src/` - Core functionality

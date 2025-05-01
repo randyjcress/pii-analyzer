@@ -44,10 +44,22 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-### 3. Install dependencies
+### 3. Install the package
+
+You can install the package in one of two ways:
+
+#### Option A: Install for development
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
+```
+
+This installs the package in development mode, allowing you to modify the code and see changes immediately.
+
+#### Option B: Install from the repository
+
+```bash
+pip install .
 ```
 
 ### 4. Install Spacy language model
@@ -75,19 +87,17 @@ docker-compose up -d
 ### Basic Usage
 
 ```bash
-python -m src.cli analyze --input path/to/file.pdf --output results.json
-```
+# Run the main PII analyzer
+pii-analyzer -i path/to/file.pdf -o results.json
 
-### Enhanced CLI (Better DOCX Support)
-
-```bash
-python fix_enhanced_cli.py -i path/to/file.docx -o results.json
+# You can also run the script directly
+python pii_analyzer.py -i path/to/file.pdf -o results.json
 ```
 
 ### Batch Processing
 
 ```bash
-python fix_enhanced_cli.py -i path/to/directory -o output.json
+pii-analyzer -i path/to/directory -o output.json
 ```
 
 ### NC Breach Analysis
@@ -100,6 +110,8 @@ python strict_nc_breach_pii.py analysis_results.json
 
 ### Redaction
 
+For redaction functionality, use the src.cli directly:
+
 ```bash
 python -m src.cli redact --input path/to/file.pdf --output redacted.txt
 ```
@@ -109,12 +121,14 @@ python -m src.cli redact --input path/to/file.pdf --output redacted.txt
 ```
 --input, -i          Input file or directory
 --output, -o         Output file or directory
---format, -f         Output format (json, text, csv)
 --entities, -e       Comma-separated list of entities to detect (default: all)
 --threshold, -t      Confidence threshold (0-1, default: 0.7)
---anonymize, -a      Anonymization method (mask, replace, hash, redact)
---ocr, -c            Force OCR for text extraction
---verbose, -v        Increase output verbosity
+--debug              Show detailed debug information
+--ocr                Force OCR for text extraction
+--ocr-dpi            DPI for OCR
+--ocr-threads        Number of OCR threads (0=auto)
+--max-pages          Maximum pages per PDF
+--sample             Analyze only a sample of files
 ```
 
 ## Development
@@ -133,8 +147,10 @@ pii-analysis/
 │   └── cli.py           # Command-line interface
 ├── tests/               # Test modules
 ├── sample_files/        # Sample files for testing
-├── fix_enhanced_cli.py  # Enhanced CLI with better DOCX support
+├── pii_analyzer.py      # Main entry point
+├── fix_enhanced_cli.py  # Enhanced CLI implementation
 ├── strict_nc_breach_pii.py # NC breach notification analysis
+├── setup.py            # Package installation configuration
 ├── requirements.txt     # Project dependencies
 └── README.md            # Project documentation
 ```
