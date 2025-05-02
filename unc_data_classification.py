@@ -16,6 +16,10 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Set, Optional, Any, Tuple
 
+# Add src directory to path to allow imports from PII analyzer modules
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+from src.database.db_reporting import load_pii_data_from_db, get_file_type_statistics
+
 # UNC-System classification tiers
 class UNCTier(IntEnum):
     PUBLIC = 0        # Tier-0
@@ -179,7 +183,64 @@ def analyze_pii_report(report_path: str, threshold: float = HIGH_CONFIDENCE_THRE
     
     return classified_files
 
-def generate_executive_summary(classified_files: Dict[str, Dict], original_report_path: str = None) -> str:
+def analyze_pii_database(db_path: str, job_id: Optional[int] = None, threshold: float = HIGH_CONFIDENCE_THRESHOLD) -> Dict[str, Dict]:
+    """
+    Analyzes PII data from a database to classify files according to UNC data classification tiers.
+    
+    Args:
+        db_path: Path to the SQLite database file
+        job_id: Specific job ID to analyze (most recent if None)
+        threshold: Confidence threshold for entities
+        
+    Returns:
+        Dictionary of files with their entities and classification tiers
+    """
+    # Load data from database
+    data = load_pii_data_from_db(db_path, job_id, threshold)
+    
+    # Dictionary to track files and their entities
+    file_entities = defaultdict(list)
+    file_entity_sets = defaultdict(set)
+    
+    # Process each file result
+    for file_result in data.get('results', []):
+        file_path = file_result.get('file_path', '')
+        entities = file_result.get('entities', [])
+        
+        # Collect all high-confidence entities for the file
+        for entity in entities:
+            entity_type = entity.get('entity_type', '')
+            confidence = entity.get('score', 0.0)
+            text = entity.get('text', '')
+            
+            # Add to entity set for tier evaluation
+            file_entity_sets[file_path].add(entity_type)
+            
+            # Store all entities for reporting
+            file_entities[file_path].append({
+                'type': entity_type,
+                'category': ENTITY_DISPLAY_NAMES.get(entity_type, entity_type),
+                'confidence': confidence,
+                'text': text
+            })
+    
+    # Classify each file according to UNC tiers
+    classified_files = {}
+    for file_path, entity_set in file_entity_sets.items():
+        tier = tier_for_entities(entity_set)
+        
+        # Only include files with entities (exclude purely public)
+        if len(file_entities[file_path]) > 0:
+            classified_files[file_path] = {
+                'tier': tier,
+                'tier_name': TIER_DISPLAY[tier]['name'],
+                'entities': file_entities[file_path],
+                'entity_types': list(entity_set)
+            }
+    
+    return classified_files
+
+def generate_executive_summary(classified_files: Dict[str, Dict], original_report_path: str = None, db_path: str = None, job_id: Optional[int] = None) -> str:
     """Generate a concise executive summary report of classified files."""
     output = []
     output.append(f"UNC DATA CLASSIFICATION EXECUTIVE SUMMARY")
@@ -189,8 +250,16 @@ def generate_executive_summary(classified_files: Dict[str, Dict], original_repor
     file_type_stats = {}
     total_files = 0
     
-    # Try to extract file type information from the original report
-    if original_report_path and os.path.exists(original_report_path):
+    # Try to extract file type information from the database if provided
+    if db_path:
+        try:
+            file_type_stats = get_file_type_statistics(db_path, job_id)
+            total_files = sum(file_type_stats.values())
+        except Exception as e:
+            print(f"Warning: Could not extract file statistics from database: {e}")
+    
+    # If database not provided or failed, try from the original report
+    if not file_type_stats and original_report_path and os.path.exists(original_report_path):
         try:
             with open(original_report_path, 'r') as f:
                 data = json.load(f)
@@ -201,124 +270,67 @@ def generate_executive_summary(classified_files: Dict[str, Dict], original_repor
                         file_path = result.get('file_path', '')
                         if file_path:
                             ext = os.path.splitext(file_path)[1].lower()
-                            if ext:
-                                # Normalize the extension (remove dot, handle jpeg/jpg)
-                                ext = ext[1:]  # Remove the dot
-                                if ext == 'jpeg':
-                                    ext = 'jpg'
-                                file_type_stats[ext] = file_type_stats.get(ext, 0) + 1
-                                total_files += 1
-                
-                # If the report has file_type_stats, use those instead
-                if 'file_type_stats' in data and isinstance(data['file_type_stats'], dict):
-                    success_stats = data.get('file_type_stats', {}).get('success', {})
-                    for ext, count in success_stats.items():
-                        # Normalize extension (remove the dot)
-                        ext = ext.lstrip('.').lower()
-                        if ext == 'jpeg':
-                            ext = 'jpg'
-                        file_type_stats[ext] = file_type_stats.get(ext, 0) + count
-                        
-                    # If we have a total_files count in the report, use that
-                    if 'total_files' in data and isinstance(data['total_files'], int):
-                        total_files = data['total_files']
-                    else:
-                        total_files = sum(success_stats.values())
-                        
+                            file_type_stats[ext] = file_type_stats.get(ext, 0) + 1
+                            total_files += 1
         except Exception as e:
-            # If there's an error, don't add file type stats
-            print(f"Warning: Could not extract file type statistics: {e}")
-            file_type_stats = {}
-
-    # Display file type statistics if available
+            print(f"Warning: Could not extract file statistics from report: {e}")
+    
+    # If we have file type statistics, include them in the report
     if file_type_stats:
-        output.append(f"Document Set Summary:")
-        output.append(f"Total files processed: {total_files}")
-        
-        output.append(f"File types:")
+        output.append("")
+        output.append(f"Total Files Analyzed: {total_files}")
+        output.append("File Types:")
         for ext, count in sorted(file_type_stats.items(), key=lambda x: x[1], reverse=True):
-            output.append(f"  .{ext}: {count}")
+            output.append(f"  {ext}: {count} files")
     
-    # Count files by tier
-    tier_counts = defaultdict(int)
-    for file_info in classified_files.values():
-        tier = file_info['tier']
-        tier_counts[tier] += 1
+    # Count classification tiers
+    tier_counts = {}
+    for file_data in classified_files.values():
+        tier = file_data['tier']
+        tier_counts[tier] = tier_counts.get(tier, 0) + 1
     
-    output.append(f"Files Classified: {len(classified_files)}")
-    output.append(f"Classification Breakdown:")
-    for tier in sorted(UNCTier, reverse=True):
-        if tier_counts[tier] > 0:
-            output.append(f"  {TIER_DISPLAY[tier]['name']}: {tier_counts[tier]} files")
+    # Generate summary
+    output.append("")
+    output.append(f"Classified Files: {len(classified_files)} files contain sensitive information")
     
-    output.append("-" * 80)
-    output.append(f"{'TIER':<20} {'ENTITIES':<8} {'FILE PATH':<52}")
-    output.append("-" * 80)
+    # Show counts by tier
+    output.append("")
+    output.append("Classification Summary:")
+    for tier in sorted([UNCTier.RESTRICTED, UNCTier.CONFIDENTIAL, UNCTier.INTERNAL, UNCTier.PUBLIC]):
+        count = tier_counts.get(tier, 0)
+        if count > 0:
+            tier_info = TIER_DISPLAY[tier]
+            output.append(f"  {tier_info['name']}: {count} files")
     
-    # Group files by tier for ordered output
-    files_by_tier = defaultdict(list)
-    for file_path, file_info in classified_files.items():
-        tier = file_info['tier']
-        entity_count = len(file_info['entities'])
-        files_by_tier[tier].append((file_path, entity_count))
+    # Add entity type counts by tier
+    entity_by_tier = defaultdict(set)
+    for file_data in classified_files.values():
+        tier = file_data['tier']
+        entity_types = set(file_data['entity_types'])
+        entity_by_tier[tier].update(entity_types)
     
-    # Generate the report lines, ordered by tier level (high to low)
-    for tier in sorted(files_by_tier.keys(), reverse=True):
-        tier_name = TIER_DISPLAY[tier]['name']
-        
-        # Sort files within tier by entity count
-        sorted_files = sorted(files_by_tier[tier], key=lambda x: x[1], reverse=True)
-        
-        for file_path, entity_count in sorted_files:
-            # Truncate path if too long
-            if len(file_path) > 51:
-                display_path = "..." + file_path[-48:]
-            else:
-                display_path = file_path
-                
-            output.append(f"{tier_name:<20} {entity_count:<8} {display_path}")
+    output.append("")
+    output.append("Top Sensitive Entity Types by Tier:")
     
-    # Add listing of entity types found by tier
-    output.append("-" * 80)
-    output.append("Entity Types by Classification Tier:")
+    # Restricted entities
+    if UNCTier.RESTRICTED in entity_by_tier and entity_by_tier[UNCTier.RESTRICTED]:
+        output.append(f"  {TIER_DISPLAY[UNCTier.RESTRICTED]['name']}:")
+        for entity_type in sorted(entity_by_tier[UNCTier.RESTRICTED] & RESTRICTED):
+            output.append(f"    • {ENTITY_DISPLAY_NAMES.get(entity_type, entity_type)}")
     
-    # Collect entity types found in each tier
-    entities_by_tier = {
-        UNCTier.RESTRICTED: set(),
-        UNCTier.CONFIDENTIAL: set(),
-        UNCTier.INTERNAL: set()
-    }
+    # Confidential entities
+    if UNCTier.CONFIDENTIAL in entity_by_tier and entity_by_tier[UNCTier.CONFIDENTIAL]:
+        output.append(f"  {TIER_DISPLAY[UNCTier.CONFIDENTIAL]['name']}:")
+        for entity_type in sorted(entity_by_tier[UNCTier.CONFIDENTIAL] & CONFIDENTIAL):
+            output.append(f"    • {ENTITY_DISPLAY_NAMES.get(entity_type, entity_type)}")
     
-    for file_info in classified_files.values():
-        tier = file_info['tier']
-        entity_types = set(file_info['entity_types'])
-        
-        # Add actual entities found to the respective tier
-        if tier == UNCTier.RESTRICTED:
-            entities_by_tier[UNCTier.RESTRICTED].update(entity_types & RESTRICTED)
-        elif tier == UNCTier.CONFIDENTIAL:
-            entities_by_tier[UNCTier.CONFIDENTIAL].update(entity_types & CONFIDENTIAL)
-        elif tier == UNCTier.INTERNAL:
-            entities_by_tier[UNCTier.INTERNAL].update(entity_types & INTERNAL)
+    # Internal entities
+    if UNCTier.INTERNAL in entity_by_tier and entity_by_tier[UNCTier.INTERNAL]:
+        output.append(f"  {TIER_DISPLAY[UNCTier.INTERNAL]['name']}:")
+        for entity_type in sorted(entity_by_tier[UNCTier.INTERNAL] & INTERNAL):
+            output.append(f"    • {ENTITY_DISPLAY_NAMES.get(entity_type, entity_type)}")
     
-    # Display entities by tier
-    for tier in sorted(entities_by_tier.keys(), reverse=True):
-        if not entities_by_tier[tier]:
-            continue
-            
-        tier_name = TIER_DISPLAY[tier]['name']
-        output.append(f"  {tier_name}:")
-        
-        for entity_type in sorted(entities_by_tier[tier]):
-            display_name = ENTITY_DISPLAY_NAMES.get(entity_type, entity_type)
-            output.append(f"    - {display_name} ({entity_type})")
-    
-    # Add legend
-    output.append("-" * 80)
-    output.append(f"UNC DATA CLASSIFICATION TIERS:")
-    for tier in sorted(UNCTier, reverse=True):
-        output.append(f"  {TIER_DISPLAY[tier]['name']}: {TIER_DISPLAY[tier]['description']}")
-    
+    # Return formatted summary
     return "\n".join(output)
 
 def generate_detailed_report(classified_files: Dict[str, Dict]) -> str:
@@ -326,327 +338,336 @@ def generate_detailed_report(classified_files: Dict[str, Dict]) -> str:
     output = []
     output.append(f"UNC DATA CLASSIFICATION DETAILED REPORT")
     output.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    output.append(f"\nFiles requiring protection according to UNC data classification:\n")
+    output.append(f"Total Files: {len(classified_files)}")
+    output.append("-" * 80)
     
-    # Group files by tier for ordered output
-    files_by_tier = defaultdict(list)
-    for file_path, file_info in classified_files.items():
-        tier = file_info['tier']
-        files_by_tier[tier].append((file_path, file_info))
+    # Sort files by tier (highest to lowest) and then by path
+    sorted_files = sorted(
+        classified_files.items(), 
+        key=lambda x: (-x[1]['tier'], x[0])
+    )
     
-    # Generate the report lines, ordered by tier level (high to low)
-    for tier in sorted(files_by_tier.keys(), reverse=True):
-        tier_name = TIER_DISPLAY[tier]['name']
-        output.append(f"\n{'='*40} {tier_name} {'='*40}")
+    # Generate detailed report for each file
+    for file_path, file_data in sorted_files:
+        tier = file_data['tier']
+        tier_name = file_data['tier_name']
+        entities = file_data['entities']
         
-        # Sort files within tier by entity count
-        sorted_file_entries = sorted(files_by_tier[tier], key=lambda x: len(x[1]['entities']), reverse=True)
+        # Get color code for tier
+        tier_color = TIER_DISPLAY[tier]['color']
         
-        for file_path, file_info in sorted_file_entries:
-            output.append(f"\nFile: {file_path}")
-            output.append(f"Classification: {tier_name}")
-            output.append(f"Number of entities: {len(file_info['entities'])}")
+        # Add file information
+        output.append(f"File: {file_path}")
+        output.append(f"Classification: {tier_name}")
+        output.append(f"Entities:")
+        
+        # Group entities by type
+        entity_groups = defaultdict(list)
+        for entity in entities:
+            entity_groups[entity['type']].append(entity)
+        
+        # Print entities by type, sorted by highest sensitivity
+        for entity_type, group in sorted(
+            entity_groups.items(),
+            key=lambda x: (
+                -(3 if x[0] in RESTRICTED else 
+                  2 if x[0] in CONFIDENTIAL else 
+                  1 if x[0] in INTERNAL else 0),
+                x[0]
+            )
+        ):
+            # Get friendly name for entity type
+            friendly_name = ENTITY_DISPLAY_NAMES.get(entity_type, entity_type)
             
-            # Count entity types
-            entity_counts = defaultdict(int)
-            for entity in file_info['entities']:
-                entity_counts[entity['category']] += 1
+            # Determine sensitivity tier of this entity type
+            entity_tier = "Restricted" if entity_type in RESTRICTED else \
+                         "Confidential" if entity_type in CONFIDENTIAL else \
+                         "Internal" if entity_type in INTERNAL else "Public"
             
-            output.append("Entity types:")
-            for category, count in sorted(entity_counts.items(), key=lambda x: x[1], reverse=True):
-                output.append(f"  - {category}: {count}")
+            output.append(f"  - {friendly_name} ({entity_tier}):")
             
-            # Determine classification reason
-            output.append("Classification reason:")
-            entity_types = set(file_info['entity_types'])
-            restricted_found = entity_types & RESTRICTED
-            confidential_found = entity_types & CONFIDENTIAL
-            internal_found = entity_types & INTERNAL
+            # List up to 5 examples with scores
+            for i, entity in enumerate(sorted(group, key=lambda x: -x['confidence'])[:5]):
+                # Mask sensitive text for reporting
+                masked_text = mask_sensitive_text(entity['text'], entity_type)
+                output.append(f"    {masked_text} (confidence: {entity['confidence']:.2f})")
             
-            if restricted_found:
-                output.append(f"  - Contains Tier-3 Restricted data types: {', '.join(restricted_found)}")
-            elif confidential_found:
-                output.append(f"  - Contains Tier-2 Confidential data types: {', '.join(confidential_found)}")
-            elif internal_found:
-                output.append(f"  - Contains Tier-1 Internal data types: {', '.join(internal_found)}")
-            
-            # Show sample of entity text (max 3 per type)
-            output.append("Sample entities (max 3 per type):")
-            samples_by_type = defaultdict(list)
-            
-            for entity in file_info['entities']:
-                category = entity['category']
-                if len(samples_by_type[category]) < 3:
-                    samples_by_type[category].append(entity)
-                    
-            for category, samples in samples_by_type.items():
-                output.append(f"  {category}:")
-                for sample in samples:
-                    # Mask part of the sensitive data for the report
-                    masked_text = mask_sensitive_text(sample['text'], sample['type'])
-                    output.append(f"    - {masked_text} (confidence: {sample['confidence']:.2f})")
-            
-            output.append("-" * 80)
+            # If more than 5, show count
+            if len(group) > 5:
+                output.append(f"    ... and {len(group) - 5} more instances")
+        
+        output.append("-" * 80)
     
     return "\n".join(output)
 
 def generate_report_json(classified_files: Dict[str, Dict]) -> str:
-    """Generate a JSON representation of the classified files."""
+    """Generate a JSON report of classified files."""
+    # Create a structure suitable for JSON serialization
     report = {
-        "metadata": {
-            "report_type": "UNC Data Classification Analysis",
-            "generated_at": datetime.now().isoformat(),
-            "file_count": len(classified_files)
-        },
+        "generated_at": datetime.now().isoformat(),
+        "total_files": len(classified_files),
         "tier_counts": {
-            str(tier.value): 0 for tier in UNCTier
+            "tier3_restricted": sum(1 for d in classified_files.values() if d['tier'] == UNCTier.RESTRICTED),
+            "tier2_confidential": sum(1 for d in classified_files.values() if d['tier'] == UNCTier.CONFIDENTIAL),
+            "tier1_internal": sum(1 for d in classified_files.values() if d['tier'] == UNCTier.INTERNAL),
+            "tier0_public": sum(1 for d in classified_files.values() if d['tier'] == UNCTier.PUBLIC)
         },
-        "classified_files": {}
+        "files": []
     }
     
-    # Count files by tier
-    for file_info in classified_files.values():
-        tier = file_info['tier']
-        report["tier_counts"][str(tier.value)] += 1
+    # Convert IntEnum tiers to strings for JSON serialization
+    tier_names = {
+        UNCTier.RESTRICTED: "tier3_restricted",
+        UNCTier.CONFIDENTIAL: "tier2_confidential",
+        UNCTier.INTERNAL: "tier1_internal",
+        UNCTier.PUBLIC: "tier0_public"
+    }
     
     # Add file details
-    for file_path, file_info in classified_files.items():
-        tier = file_info['tier']
-        entity_types = set(file_info['entity_types'])
-        entity_by_type = defaultdict(list)
-        
-        # Group entities by type
-        for entity in file_info['entities']:
-            entity_by_type[entity['type']].append({
-                "text": mask_sensitive_text(entity['text'], entity['type']),
-                "confidence": entity['confidence'],
-                "category": entity['category']
-            })
-        
-        # Determine classification reason
-        restricted_found = entity_types & RESTRICTED
-        confidential_found = entity_types & CONFIDENTIAL
-        internal_found = entity_types & INTERNAL
-        
-        classification_reasons = []
-        if restricted_found:
-            classification_reasons.append({
-                "tier": "restricted",
-                "entities": list(restricted_found)
-            })
-        elif confidential_found:
-            classification_reasons.append({
-                "tier": "confidential",
-                "entities": list(confidential_found)
-            })
-        elif internal_found:
-            classification_reasons.append({
-                "tier": "internal",
-                "entities": list(internal_found)
-            })
-        
-        # Add to the report
-        report["classified_files"][file_path] = {
-            "tier": int(tier),
-            "tier_name": TIER_DISPLAY[tier]['name'],
-            "entity_count": len(file_info['entities']),
-            "entity_types": list(entity_types),
-            "classification_reasons": classification_reasons,
-            "entities_by_type": dict(entity_by_type)
+    for file_path, file_data in classified_files.items():
+        # Create a serializable structure for each file
+        file_entry = {
+            "file_path": file_path,
+            "classification": tier_names[file_data['tier']],
+            "tier_name": file_data['tier_name'],
+            "entity_count": len(file_data['entities']),
+            "entity_types": file_data['entity_types'],
+            "entities": []
         }
+        
+        # Add entity details
+        for entity in file_data['entities']:
+            # Mask sensitive text for reporting
+            masked_text = mask_sensitive_text(entity['text'], entity['type'])
+            
+            entity_entry = {
+                "type": entity['type'],
+                "category": entity['category'],
+                "text": masked_text,
+                "confidence": entity['confidence']
+            }
+            file_entry["entities"].append(entity_entry)
+        
+        report["files"].append(file_entry)
     
     return json.dumps(report, indent=2)
 
 def clone_classified_files(classified_files: Dict[str, Dict], clone_dir: str, min_tier: UNCTier = None) -> List[str]:
     """
-    Clone the classified files to a specified directory maintaining structure.
-    Optionally filter by minimum classification tier.
+    Clone classified files to a directory structure organized by tier.
+    
+    Args:
+        classified_files: Dictionary of classified files
+        clone_dir: Base directory to clone files to
+        min_tier: Minimum tier to include (default: include all)
+        
+    Returns:
+        List of copied file paths
     """
-    if not os.path.exists(clone_dir):
-        os.makedirs(clone_dir)
+    os.makedirs(clone_dir, exist_ok=True)
     
+    # Create tier subdirectories
+    for tier in UNCTier:
+        if min_tier is None or tier >= min_tier:
+            tier_dir = os.path.join(clone_dir, TIER_DISPLAY[tier]['name'])
+            os.makedirs(tier_dir, exist_ok=True)
+    
+    # Copy files to appropriate tier directories
     copied_files = []
-    
-    for file_path, file_info in classified_files.items():
-        # Skip files below the minimum tier if specified
-        if min_tier is not None and file_info['tier'] < min_tier:
-            continue
-            
-        # Check if file exists
-        if not os.path.exists(file_path):
-            print(f"Warning: Could not find {file_path}")
-            continue
-            
-        # Create the destination directory structure
-        rel_path = os.path.relpath(file_path, '/')
-        dest_path = os.path.join(clone_dir, rel_path)
-        dest_dir = os.path.dirname(dest_path)
+    for file_path, file_data in classified_files.items():
+        tier = file_data['tier']
         
-        if not os.path.exists(dest_dir):
-            os.makedirs(dest_dir)
+        # Skip if below minimum tier
+        if min_tier is not None and tier < min_tier:
+            continue
         
-        # Copy the file
+        # Create target directory
+        target_dir = os.path.join(clone_dir, TIER_DISPLAY[tier]['name'])
+        
+        # Copy file
         try:
-            shutil.copy2(file_path, dest_path)
-            copied_files.append(dest_path)
+            if os.path.exists(file_path):
+                filename = os.path.basename(file_path)
+                target_path = os.path.join(target_dir, filename)
+                
+                # Handle duplicate filenames by adding a suffix
+                if os.path.exists(target_path):
+                    base, ext = os.path.splitext(filename)
+                    i = 1
+                    while os.path.exists(target_path):
+                        target_path = os.path.join(target_dir, f"{base}_{i}{ext}")
+                        i += 1
+                
+                shutil.copy2(file_path, target_path)
+                copied_files.append(file_path)
         except Exception as e:
             print(f"Error copying {file_path}: {e}")
     
     return copied_files
 
 def mask_sensitive_text(text: str, entity_type: str) -> str:
-    """Masks sensitive text for display in reports."""
-    # Restricted tier - highly sensitive
-    if entity_type in RESTRICTED:
-        # Show only last 4 characters for sensitive data
-        if len(text) > 4:
-            return f"****{text[-4:]}"
-        return "****"
-    # Confidential tier
-    elif entity_type in CONFIDENTIAL:
-        # Partial masking
-        if len(text) > 5:
-            return f"{text[0:2]}****{text[-2:]}"
-        return "****"
-    # Internal tier - emails, names
-    elif entity_type in ["EMAIL_ADDRESS", "USERNAME"]:
-        # Partially mask email/username
-        if '@' in text:  # Email address
-            username, domain = text.split('@', 1)
-            if len(username) > 2:
-                return f"{username[0]}***@{domain}"
-            return f"***@{domain}"
-        elif len(text) > 4:  # Username
-            return f"{text[0]}***{text[-1]}"
-        return "****"
-    elif entity_type in ["PERSON", "FIRST_NAME", "LAST_NAME"]:
-        # Show initials for person names
+    """
+    Mask sensitive text for display in reports.
+    Different entity types are masked differently.
+    
+    Args:
+        text: Original text
+        entity_type: Type of entity
+        
+    Returns:
+        Masked text
+    """
+    if not text:
+        return ""
+    
+    # Highly sensitive information (always mask completely)
+    if entity_type in {"US_SOCIAL_SECURITY_NUMBER", "US_SSN", "CREDIT_CARD", 
+                      "PASSWORD", "ACCESS_CODE", "PIN_CODE", 
+                      "SECURITY_ANSWER", "AWS_SECRET_KEY"}:
+        return "********"
+    
+    # Partially mask names
+    if entity_type in {"PERSON", "FIRST_NAME", "LAST_NAME"}:
         parts = text.split()
-        if len(parts) > 1:
-            return ' '.join([p[0] + '.' for p in parts])
-        elif len(text) > 0:
-            return text[0] + '.'
-        return "****"
-    else:
-        # For other types, show first and last character
-        if len(text) > 4:
-            return f"{text[0]}***{text[-1]}"
-        return "****"
+        if len(parts) == 1:
+            # Single name
+            if len(text) <= 2:
+                return text[0] + "*"
+            return text[0] + "*" * (len(text) - 1)
+        else:
+            # Multiple parts (e.g., "John Smith")
+            masked_parts = []
+            for part in parts:
+                if len(part) <= 1:
+                    masked_parts.append(part)
+                else:
+                    masked_parts.append(part[0] + "*" * (len(part) - 1))
+            return " ".join(masked_parts)
+    
+    # Partially mask IDs and numbers
+    if entity_type in {"US_DRIVER_LICENSE", "US_PASSPORT", "BANK_ACCOUNT", 
+                       "MEDICAL_RECORD_NUMBER", "HEALTH_INSURANCE_POLICY_NUMBER",
+                       "US_BANK_NUMBER", "US_BANK_ROUTING", "IBAN_CODE"}:
+        if len(text) <= 4:
+            return "*" * len(text)
+        return "*" * (len(text) - 4) + text[-4:]
+    
+    # Partially mask emails
+    if entity_type == "EMAIL_ADDRESS" and "@" in text:
+        username, domain = text.split("@", 1)
+        if len(username) <= 2:
+            masked_username = username
+        else:
+            masked_username = username[0] + "*" * (len(username) - 2) + username[-1]
+        return f"{masked_username}@{domain}"
+    
+    # Default masking for other types - show first and last character
+    if len(text) <= 2:
+        return text
+    return text[0] + "*" * (len(text) - 2) + text[-1]
 
 def parse_arguments() -> argparse.Namespace:
-    """Parse and validate command line arguments."""
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="UNC Data Classification Analysis",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Analyze PII data from JSON file
+  python unc_data_classification.py --input results.json
+
+  # Analyze PII data from database
+  python unc_data_classification.py --db-path results.db
+
+  # Generate detailed report with examples
+  python unc_data_classification.py --input results.json --detailed-report
+
+  # Export high-risk files to separate location
+  python unc_data_classification.py --input results.json --copy-files classified/
+"""
     )
     
-    parser.add_argument(
-        "report_file",
-        help="Path to the PII analysis report JSON file"
-    )
+    # Input options
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--input", "-i", type=str, help="Input JSON file with PII analysis results")
+    input_group.add_argument("--db-path", "-d", type=str, help="Database file with PII analysis results")
+    parser.add_argument("--job-id", type=int, help="Specific job ID to analyze (for database input)")
     
-    parser.add_argument(
-        "-o", "--output",
-        help="Output file path for the classification report (default: stdout)"
-    )
+    # Output options
+    parser.add_argument("--output", "-o", type=str, help="Output file for report (default: stdout)")
+    parser.add_argument("--format", "-f", type=str, choices=["text", "json"], default="text", 
+                        help="Output format (default: text)")
+    parser.add_argument("--summary", "-s", action="store_true", help="Show only executive summary")
+    parser.add_argument("--detailed-report", "-r", action="store_true", help="Include detailed file info with examples")
     
-    parser.add_argument(
-        "-f", "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format (text or json)"
-    )
+    # Processing options
+    parser.add_argument("--threshold", "-t", type=float, default=HIGH_CONFIDENCE_THRESHOLD,
+                        help=f"Confidence threshold (default: {HIGH_CONFIDENCE_THRESHOLD})")
+    parser.add_argument("--min-tier", "-m", type=int, choices=[0, 1, 2, 3], default=1,
+                        help="Minimum tier to include in report (0=Public, 1=Internal, 2=Confidential, 3=Restricted)")
+    parser.add_argument("--copy-files", "-c", type=str,
+                       help="Copy classified files to specified directory (organized by tier)")
     
-    parser.add_argument(
-        "-t", "--threshold",
-        type=float,
-        default=HIGH_CONFIDENCE_THRESHOLD,
-        help="Confidence threshold for entities (0.0-1.0)"
-    )
-    
-    parser.add_argument(
-        "-c", "--clone-dir",
-        help="Directory to create cloned structure of classified files"
-    )
-    
-    parser.add_argument(
-        "-m", "--min-tier",
-        type=int,
-        choices=[0, 1, 2, 3],
-        help="Minimum tier to include in report and cloning (0=Public, 3=Restricted)"
-    )
-    
-    parser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Generate detailed verbose report instead of executive summary"
-    )
-    
-    args = parser.parse_args()
-    
-    # Validate that the report file exists
-    if not os.path.exists(args.report_file):
-        parser.error(f"Report file not found: {args.report_file}")
-    
-    # Validate threshold is in range
-    if args.threshold < 0.0 or args.threshold > 1.0:
-        parser.error(f"Threshold must be between 0.0 and 1.0")
-        
-    return args
+    return parser.parse_args()
 
 def main() -> Dict[str, Any]:
-    """Main entry point for the script."""
+    """Main function."""
     args = parse_arguments()
     
-    # Analyze the report
-    classified_files = analyze_pii_report(args.report_file, args.threshold)
-    
-    # Filter by minimum tier if specified
-    if args.min_tier is not None:
+    try:
+        # Analyze PII data based on input type
+        if args.input:
+            print(f"Analyzing PII report from JSON file: {args.input}")
+            classified_files = analyze_pii_report(args.input, args.threshold)
+        else:
+            print(f"Analyzing PII data from database: {args.db_path}")
+            classified_files = analyze_pii_database(args.db_path, args.job_id, args.threshold)
+        
+        # Filter by minimum tier
         min_tier = UNCTier(args.min_tier)
-        classified_files = {
-            file_path: file_info 
-            for file_path, file_info in classified_files.items() 
-            if file_info['tier'] >= min_tier
+        filtered_files = {
+            path: data for path, data in classified_files.items()
+            if data['tier'] >= min_tier
         }
-    
-    # Generate the report
-    if args.format == "text":
-        if args.verbose:
-            report = generate_detailed_report(classified_files)
+        
+        print(f"Found {len(filtered_files)} files classified as {TIER_DISPLAY[min_tier]['name']} or higher")
+        
+        # Generate appropriate report
+        if args.format == "text":
+            if args.summary or not args.detailed_report:
+                if args.input:
+                    report = generate_executive_summary(filtered_files, args.input)
+                else:
+                    report = generate_executive_summary(filtered_files, db_path=args.db_path, job_id=args.job_id)
+            else:
+                report = generate_detailed_report(filtered_files)
+        else:  # json format
+            report = generate_report_json(filtered_files)
+        
+        # Output report
+        if args.output:
+            with open(args.output, 'w') as f:
+                f.write(report)
+            print(f"Report saved to {args.output}")
         else:
-            report = generate_executive_summary(classified_files, args.report_file)
-    else:  # json
-        report = generate_report_json(classified_files)
-    
-    # Output the report
-    if args.output:
-        with open(args.output, 'w') as f:
-            f.write(report)
-        print(f"Report written to {args.output}")
-    else:
-        print(report)
-    
-    # Clone files if requested
-    if args.clone_dir and classified_files:
-        min_tier = UNCTier(args.min_tier) if args.min_tier is not None else None
-        copied_files = clone_classified_files(classified_files, args.clone_dir, min_tier)
-        if copied_files:
-            print(f"\nCloned {len(copied_files)} classified files to {args.clone_dir}")
-        else:
-            print(f"\nNo files were copied to {args.clone_dir}")
-    
-    # Return summary for non-interactive usage
-    return {
-        "files_analyzed": len(classified_files),
-        "report_format": args.format,
-        "output_file": args.output,
-        "clone_directory": args.clone_dir if args.clone_dir else None,
-        "tier_counts": {
-            TIER_DISPLAY[tier]['name']: sum(1 for info in classified_files.values() if info['tier'] == tier)
-            for tier in UNCTier
+            print("\n" + report)
+        
+        # Copy files if requested
+        if args.copy_files:
+            copied_files = clone_classified_files(filtered_files, args.copy_files)
+            print(f"Copied {len(copied_files)} classified files to {args.copy_files}")
+        
+        return {
+            "files_analyzed": len(classified_files),
+            "files_reported": len(filtered_files),
+            "min_tier": min_tier
         }
-    }
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        return {
+            "error": str(e)
+        }
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main() 

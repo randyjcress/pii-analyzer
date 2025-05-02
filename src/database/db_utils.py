@@ -795,6 +795,179 @@ class PIIDatabase:
             logger.error(f"Error getting all jobs: {e}")
             return []
 
+    def get_entity_counts_by_type(self, job_id: int, threshold: float = 0.0) -> Dict[str, int]:
+        """
+        Get counts of entity types for a job.
+        
+        Args:
+            job_id: Job ID to get entity counts for
+            threshold: Minimum confidence score to include
+            
+        Returns:
+            Dictionary of entity types and their counts
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+            SELECT e.entity_type, COUNT(*) as count
+            FROM entities e
+            JOIN results r ON e.result_id = r.result_id
+            JOIN files f ON r.file_id = f.file_id
+            WHERE f.job_id = ? AND f.status = 'completed' AND e.score >= ?
+            GROUP BY e.entity_type
+            ORDER BY count DESC
+            """, (job_id, threshold))
+            
+            entity_counts = {}
+            for row in cursor.fetchall():
+                entity_counts[row['entity_type']] = row['count']
+                
+            return entity_counts
+        except sqlite3.Error as e:
+            logger.error(f"Error getting entity counts for job {job_id}: {e}")
+            return {}
+    
+    def get_completed_files(self, job_id: int) -> List[Dict[str, Any]]:
+        """
+        Get all completed files for a job.
+        
+        Args:
+            job_id: Job ID to get files for
+            
+        Returns:
+            List of completed file dictionaries
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+            SELECT * FROM files
+            WHERE job_id = ? AND status = 'completed'
+            """, (job_id,))
+            
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            logger.error(f"Error getting completed files for job {job_id}: {e}")
+            return []
+    
+    def get_result_by_file_id(self, file_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get the result record for a file.
+        
+        Args:
+            file_id: File ID to get result for
+            
+        Returns:
+            Result dictionary or None if not found
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+            SELECT * FROM results
+            WHERE file_id = ?
+            """, (file_id,))
+            
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except sqlite3.Error as e:
+            logger.error(f"Error getting result for file {file_id}: {e}")
+            return None
+    
+    def get_entities_by_result_id(self, result_id: int) -> List[Dict[str, Any]]:
+        """
+        Get all entities for a result.
+        
+        Args:
+            result_id: Result ID to get entities for
+            
+        Returns:
+            List of entity dictionaries
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+            SELECT * FROM entities
+            WHERE result_id = ?
+            """, (result_id,))
+            
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            logger.error(f"Error getting entities for result {result_id}: {e}")
+            return []
+    
+    def get_files_by_job_id(self, job_id: int) -> List[Dict[str, Any]]:
+        """
+        Get all files for a job.
+        
+        Args:
+            job_id: Job ID to get files for
+            
+        Returns:
+            List of file dictionaries
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+            SELECT * FROM files
+            WHERE job_id = ?
+            """, (job_id,))
+            
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            logger.error(f"Error getting files for job {job_id}: {e}")
+            return []
+    
+    def get_file_results_with_entities(self, file_ids: List[int]) -> List[Dict[str, Any]]:
+        """
+        Get results with entities for multiple files.
+        Useful for batch processing in reporting.
+        
+        Args:
+            file_ids: List of file IDs to get results for
+            
+        Returns:
+            List of file results with entities
+        """
+        if not file_ids:
+            return []
+            
+        try:
+            cursor = self.conn.cursor()
+            
+            # Prepare placeholders for the IN clause
+            placeholders = ','.join(['?'] * len(file_ids))
+            
+            # Get file and result data
+            cursor.execute(f"""
+            SELECT f.*, r.result_id, r.entity_count, r.processing_time, r.metadata
+            FROM files f
+            LEFT JOIN results r ON f.file_id = r.file_id
+            WHERE f.file_id IN ({placeholders})
+            """, file_ids)
+            
+            files = []
+            for file_row in cursor.fetchall():
+                file_data = dict(file_row)
+                
+                # Get entities if result exists
+                if file_data['result_id']:
+                    entity_cursor = self.conn.cursor()
+                    entity_cursor.execute("""
+                    SELECT * FROM entities
+                    WHERE result_id = ?
+                    """, (file_data['result_id'],))
+                    
+                    entities = [dict(entity_row) for entity_row in entity_cursor.fetchall()]
+                    file_data['entities'] = entities
+                else:
+                    file_data['entities'] = []
+                
+                files.append(file_data)
+            
+            return files
+        except sqlite3.Error as e:
+            logger.error(f"Error getting file results with entities: {e}")
+            return []
+
 
 # Factory function to get a database instance
 def get_database(db_path: str = 'pii_analysis.db') -> PIIDatabase:

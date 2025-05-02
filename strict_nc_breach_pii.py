@@ -13,6 +13,10 @@ from collections import defaultdict
 from pathlib import Path
 from datetime import datetime
 
+# Add src directory to path to allow imports from PII analyzer modules
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+from src.database.db_reporting import load_pii_data_from_db, get_file_type_statistics
+
 # Enhanced set of sensitive entity types based on both Presidio built-ins
 # and custom recognizers that would trigger NC breach notification
 SENSITIVE_TYPES = {
@@ -185,7 +189,56 @@ def analyze_pii_report(report_path, threshold=HIGH_CONFIDENCE_THRESHOLD):
     
     return breach_files
 
-def generate_executive_summary(high_risk_files, original_report_path=None):
+def analyze_pii_database(db_path, job_id=None, threshold=HIGH_CONFIDENCE_THRESHOLD):
+    """
+    Analyzes PII data from a database to identify files triggering breach notification.
+    
+    Args:
+        db_path: Path to the SQLite database file
+        job_id: Specific job ID to analyze (most recent if None)
+        threshold: Confidence threshold for entities
+        
+    Returns:
+        Dictionary of high-risk files with their entities
+    """
+    # Load data from database
+    data = load_pii_data_from_db(db_path, job_id, threshold)
+    
+    # Dictionary to track files and their sensitive entities
+    high_risk_files = defaultdict(list)
+    file_entity_sets = defaultdict(set)
+    
+    # Process each file result
+    for file_result in data.get('results', []):
+        file_path = file_result.get('file_path', '')
+        entities = file_result.get('entities', [])
+        
+        # Collect all high-confidence entities for the file
+        for entity in entities:
+            entity_type = entity.get('entity_type', '')
+            confidence = entity.get('score', 0.0)
+            text = entity.get('text', '')
+            
+            # Add to entity set for breach trigger evaluation
+            file_entity_sets[file_path].add(entity_type)
+            
+            # Store all entities (not just sensitive ones) for reporting
+            high_risk_files[file_path].append({
+                'type': entity_type,
+                'category': ENTITY_DISPLAY_NAMES.get(entity_type, entity_type),
+                'confidence': confidence,
+                'text': text
+            })
+    
+    # Filter to only files that trigger breach notification
+    breach_files = {}
+    for file_path, entity_set in file_entity_sets.items():
+        if breach_trigger(entity_set):
+            breach_files[file_path] = high_risk_files[file_path]
+    
+    return breach_files
+
+def generate_executive_summary(high_risk_files, original_report_path=None, db_path=None, job_id=None):
     """Generate a concise executive summary report of high-risk files."""
     output = []
     output.append(f"NC §75-61 BREACH NOTIFICATION EXECUTIVE SUMMARY")
@@ -195,8 +248,16 @@ def generate_executive_summary(high_risk_files, original_report_path=None):
     file_type_stats = {}
     total_files = 0
     
-    # Try to extract file type information from the original report
-    if original_report_path and os.path.exists(original_report_path):
+    # Try to extract file type information from the database if provided
+    if db_path:
+        try:
+            file_type_stats = get_file_type_statistics(db_path, job_id)
+            total_files = sum(file_type_stats.values())
+        except Exception as e:
+            print(f"Warning: Could not extract file statistics from database: {e}")
+    
+    # If database not provided or failed, try from the original report
+    if not file_type_stats and original_report_path and os.path.exists(original_report_path):
         try:
             with open(original_report_path, 'r') as f:
                 data = json.load(f)
@@ -207,102 +268,59 @@ def generate_executive_summary(high_risk_files, original_report_path=None):
                         file_path = result.get('file_path', '')
                         if file_path:
                             ext = os.path.splitext(file_path)[1].lower()
-                            if ext:
-                                # Normalize the extension (remove dot, handle jpeg/jpg)
-                                ext = ext[1:]  # Remove the dot
-                                if ext == 'jpeg':
-                                    ext = 'jpg'
-                                file_type_stats[ext] = file_type_stats.get(ext, 0) + 1
-                                total_files += 1
-                
-                # If the report has file_type_stats, use those instead
-                if 'file_type_stats' in data and isinstance(data['file_type_stats'], dict):
-                    success_stats = data.get('file_type_stats', {}).get('success', {})
-                    for ext, count in success_stats.items():
-                        # Normalize extension (remove the dot)
-                        ext = ext.lstrip('.').lower()
-                        if ext == 'jpeg':
-                            ext = 'jpg'
-                        file_type_stats[ext] = file_type_stats.get(ext, 0) + count
-                        
-                    # If we have a total_files count in the report, use that
-                    if 'total_files' in data and isinstance(data['total_files'], int):
-                        total_files = data['total_files']
-                    else:
-                        total_files = sum(success_stats.values())
-                        
+                            file_type_stats[ext] = file_type_stats.get(ext, 0) + 1
+                            total_files += 1
         except Exception as e:
-            # If there's an error, don't add file type stats
-            print(f"Warning: Could not extract file type statistics: {e}")
-            file_type_stats = {}
-
-    # Display file type statistics if available
+            print(f"Warning: Could not extract file statistics from report: {e}")
+    
+    # If we have file type statistics, include them in the report
     if file_type_stats:
-        output.append(f"Document Set Summary:")
-        output.append(f"Total files processed: {total_files}")
-        
-        output.append(f"File types:")
+        output.append("")
+        output.append(f"Total Files Analyzed: {total_files}")
+        output.append("File Types:")
         for ext, count in sorted(file_type_stats.items(), key=lambda x: x[1], reverse=True):
-            output.append(f"  .{ext}: {count}")
+            output.append(f"  {ext}: {count} files")
     
-    output.append(f"Files Found with PII: {len(high_risk_files)}")
-    output.append("-" * 80)
-    output.append(f"{'CLASSIFICATION':<12} {'ENTITIES':<8} {'FILE PATH':<60}")
-    output.append("-" * 80)
-    
-    # For sorting based on classification severity - ordered from most to least severe
-    severity_order = {
-        "HIGH-RISK": 1,
-        "PII-SSN": 2,
-        "PII-FIN": 3,
-        "PII-GOV": 4,
-        "PII-MED": 5,
-        "PII-GEN": 6,
-        "CREDS": 7,
-        "UNKNOWN": 8
-    }
-    
-    # Process and collect file data for sorted output
-    file_data = []
+    # Count files by breach type
+    breach_types = {}
     for file_path, entities in high_risk_files.items():
-        entity_types = {entity['type'] for entity in entities}
-        classification = classify_breach(entity_types)
-        file_data.append((classification, len(entities), file_path, severity_order.get(classification, 9)))
+        entity_types = {e['type'] for e in entities}
+        breach_type = classify_breach(entity_types)
+        breach_types[breach_type] = breach_types.get(breach_type, 0) + 1
     
-    # Sort by classification severity then by entity count (descending)
-    sorted_files = sorted(file_data, key=lambda x: (x[3], -x[1]))
+    # Generate breach summary
+    output.append("")
+    output.append(f"HIGH-RISK FILES: {len(high_risk_files)} files contain personal information subject to breach notification")
     
-    # Generate the report lines
-    for classification, entity_count, file_path, _ in sorted_files:
-        # Truncate path if too long
-        if len(file_path) > 59:
-            display_path = "..." + file_path[-56:]
-        else:
-            display_path = file_path
-            
-        output.append(f"{classification:<12} {entity_count:<8} {display_path}")
+    # Show counts by breach type
+    output.append("")
+    output.append("Files by Risk Category:")
+    for breach_type, label in sorted(BREACH_CLASSIFICATIONS.items(), key=lambda x: x[0]):
+        count = breach_types.get(label, 0)
+        if count > 0:
+            output.append(f"  {label}: {count} files")
     
-    # Add summary statistics
-    output.append("-" * 80)
-    classification_counts = defaultdict(int)
-    for classification, _, _, _ in sorted_files:
-        classification_counts[classification] += 1
+    # Summary of key risk areas
+    output.append("")
+    output.append("Top Risk Areas:")
     
-    output.append("Classification Summary:")
-    for classification, count in sorted(classification_counts.items(), 
-                                        key=lambda x: severity_order.get(x[0], 9)):
-        output.append(f"  {classification:<12}: {count} files")
+    ssn_count = breach_types.get(BREACH_CLASSIFICATIONS["NAME_WITH_SSN"], 0)
+    if ssn_count > 0:
+        output.append(f"  • {ssn_count} files contain names with Social Security Numbers")
+        
+    financial_count = breach_types.get(BREACH_CLASSIFICATIONS["NAME_WITH_FINANCIALS"], 0)
+    if financial_count > 0:
+        output.append(f"  • {financial_count} files contain names with financial account information")
+        
+    gov_id_count = breach_types.get(BREACH_CLASSIFICATIONS["NAME_WITH_GOV_ID"], 0)
+    if gov_id_count > 0:
+        output.append(f"  • {gov_id_count} files contain names with government ID numbers")
     
-    output.append("-" * 80)
-    output.append(f"LEGEND:")
-    output.append(f"  PII-SSN: Name with Social Security Number")
-    output.append(f"  PII-FIN: Name with Financial Information")
-    output.append(f"  PII-GOV: Name with Government ID")
-    output.append(f"  PII-MED: Name with Health Information")
-    output.append(f"  PII-GEN: Name with Other Sensitive Data")
-    output.append(f"  CREDS:   Credential Pairs (Username/Email + Password)")
-    output.append(f"  HIGH-RISK: Multiple Sensitive Categories")
+    credentials_count = breach_types.get(BREACH_CLASSIFICATIONS["CREDENTIALS"], 0)
+    if credentials_count > 0:
+        output.append(f"  • {credentials_count} files contain credential pairs (username/email with password)")
     
+    # Return formatted summary
     return "\n".join(output)
 
 def generate_report_text(high_risk_files):
@@ -483,98 +501,92 @@ def mask_sensitive_text(text, entity_type):
         return "****"
 
 def parse_arguments():
-    """Parse and validate command line arguments."""
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="NC §75-61 Breach Notification Analysis",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        description="NC Breach Notification Analysis",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Analyze PII data from JSON file
+  python strict_nc_breach_pii.py --input results.json
+
+  # Analyze PII data from database
+  python strict_nc_breach_pii.py --db-path results.db
+
+  # Generate detailed report with examples
+  python strict_nc_breach_pii.py --input results.json --detailed-report
+
+  # Export high-risk files to separate location
+  python strict_nc_breach_pii.py --input results.json --copy-high-risk-files high_risk/
+"""
     )
     
-    parser.add_argument(
-        "report_file",
-        help="Path to the PII analysis report JSON file"
-    )
+    # Input options
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--input", "-i", type=str, help="Input JSON file with PII analysis results")
+    input_group.add_argument("--db-path", "-d", type=str, help="Database file with PII analysis results")
+    parser.add_argument("--job-id", type=int, help="Specific job ID to analyze (for database input)")
     
-    parser.add_argument(
-        "-o", "--output",
-        help="Output file path for the breach report (default: stdout)"
-    )
+    # Output options
+    parser.add_argument("--output", "-o", type=str, help="Output file for report (default: stdout)")
+    parser.add_argument("--format", "-f", type=str, choices=["text", "json"], default="text", 
+                        help="Output format (default: text)")
+    parser.add_argument("--summary", "-s", action="store_true", help="Show only executive summary")
+    parser.add_argument("--detailed-report", "-r", action="store_true", help="Include detailed file info with examples")
     
-    parser.add_argument(
-        "-f", "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format (text or json)"
-    )
+    # Processing options
+    parser.add_argument("--threshold", "-t", type=float, default=HIGH_CONFIDENCE_THRESHOLD,
+                        help=f"Confidence threshold (default: {HIGH_CONFIDENCE_THRESHOLD})")
+    parser.add_argument("--copy-high-risk-files", "-c", type=str,
+                       help="Copy high-risk files to specified directory")
     
-    parser.add_argument(
-        "-t", "--threshold",
-        type=float,
-        default=HIGH_CONFIDENCE_THRESHOLD,
-        help="Confidence threshold for entities (0.0-1.0)"
-    )
-    
-    parser.add_argument(
-        "-c", "--clone-dir",
-        help="Directory to create cloned structure of high-risk files"
-    )
-    
-    parser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Generate detailed verbose report instead of executive summary"
-    )
-    
-    args = parser.parse_args()
-    
-    # Validate that the report file exists
-    if not os.path.exists(args.report_file):
-        parser.error(f"Report file not found: {args.report_file}")
-    
-    # Validate threshold is in range
-    if args.threshold < 0.0 or args.threshold > 1.0:
-        parser.error(f"Threshold must be between 0.0 and 1.0")
-        
-    return args
+    return parser.parse_args()
 
 def main():
-    """Main entry point for the script."""
+    """Main function."""
     args = parse_arguments()
     
-    # Analyze the report
-    high_risk_files = analyze_pii_report(args.report_file, args.threshold)
-    
-    # Generate the report
-    if args.format == "text":
-        if args.verbose:
-            report = generate_report_text(high_risk_files)
+    try:
+        # Analyze PII data based on input type
+        if args.input:
+            print(f"Analyzing PII report from JSON file: {args.input}")
+            high_risk_files = analyze_pii_report(args.input, args.threshold)
         else:
-            report = generate_executive_summary(high_risk_files, args.report_file)
-    else:  # json
-        report = generate_report_json(high_risk_files)
-    
-    # Output the report
-    if args.output:
-        with open(args.output, 'w') as f:
-            f.write(report)
-        print(f"Report written to {args.output}")
-    else:
-        print(report)
-    
-    # Clone files if requested
-    if args.clone_dir and high_risk_files:
-        copied_files = clone_high_risk_files(high_risk_files, args.clone_dir)
-        if copied_files:
-            print(f"\nCloned {len(copied_files)} high-risk files to {args.clone_dir}")
+            print(f"Analyzing PII data from database: {args.db_path}")
+            high_risk_files = analyze_pii_database(args.db_path, args.job_id, args.threshold)
+        
+        print(f"Found {len(high_risk_files)} high-risk files that trigger breach notification")
+        
+        # Generate appropriate report
+        if args.format == "text":
+            if args.summary or not args.detailed_report:
+                if args.input:
+                    report = generate_executive_summary(high_risk_files, args.input)
+                else:
+                    report = generate_executive_summary(high_risk_files, db_path=args.db_path, job_id=args.job_id)
+            else:
+                report = generate_report_text(high_risk_files)
+        else:  # json format
+            report = generate_report_json(high_risk_files)
+        
+        # Output report
+        if args.output:
+            with open(args.output, 'w') as f:
+                f.write(report)
+            print(f"Report saved to {args.output}")
         else:
-            print(f"\nNo files were copied to {args.clone_dir}")
-    
-    # Return summary for non-interactive usage
-    return {
-        "files_analyzed": len(high_risk_files),
-        "report_format": args.format,
-        "output_file": args.output,
-        "clone_directory": args.clone_dir if args.clone_dir else None
-    }
+            print("\n" + report)
+        
+        # Copy high-risk files if requested
+        if args.copy_high_risk_files:
+            copied_files = clone_high_risk_files(high_risk_files, args.copy_high_risk_files)
+            print(f"Copied {len(copied_files)} high-risk files to {args.copy_high_risk_files}")
+        
+        return high_risk_files
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        return {}
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main() 
