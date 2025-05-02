@@ -14,14 +14,6 @@ A robust, extensible pipeline for extracting text from various file formats, det
 - Intelligent thread allocation for OCR optimization
 - NC breach notification analysis for compliance
 
-## Architecture
-
-![PII Analyzer Architecture](architecture.png)
-
-```
-File Input → Text Extraction → PII Analysis → Anonymization → Output
-```
-
 ## Requirements
 
 - Python 3.11+
