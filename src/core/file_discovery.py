@@ -59,29 +59,37 @@ def scan_directory(
     db: PIIDatabase, 
     job_id: int,
     supported_extensions: Optional[Set[str]] = None,
-    max_files: Optional[int] = None
+    max_files: Optional[int] = None,
+    skip_registration: bool = False
 ) -> Tuple[int, int]:
     """
-    Scan directory and register files in database.
+    Scan directory for files and register them in the database.
     
     Args:
-        directory_path: Path to directory to scan
+        directory_path: Directory to scan
         db: Database connection
-        job_id: Current job ID
-        supported_extensions: Set of supported file extensions
-        max_files: Maximum number of files to register (None for unlimited)
+        job_id: Job ID to register files under
+        supported_extensions: Set of allowed file extensions (None for all)
+        max_files: Maximum number of files to register
+        skip_registration: If True, only count files but don't try to register them
         
     Returns:
-        Tuple of (total_files_found, new_files_registered)
+        Tuple of (total files found, newly registered files)
     """
+    logger.info(f"Scanning directory: {directory_path}")
+    
+    if not os.path.isdir(directory_path):
+        logger.error(f"Directory not found: {directory_path}")
+        return 0, 0
+    
     if supported_extensions is None:
-        supported_extensions = DEFAULT_SUPPORTED_EXTENSIONS
+        from ..utils.file_utils import get_supported_extensions
+        supported_extensions = set(get_supported_extensions().keys())
+        logger.info(f"Using default supported extensions: {supported_extensions}")
     
     total_files = 0
     new_files = 0
     start_time = time.time()
-    
-    logger.info(f"Starting directory scan of {directory_path}")
     
     try:
         for root, _, files in os.walk(directory_path):
@@ -98,6 +106,10 @@ def scan_directory(
                     continue
                     
                 total_files += 1
+                
+                # Skip registration if requested (for use with reset database)
+                if skip_registration:
+                    continue
                 
                 # Register file in database
                 try:
