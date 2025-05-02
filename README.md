@@ -13,6 +13,7 @@ A robust, extensible pipeline for extracting text from various file formats, det
 - Multi-threaded processing for handling multiple files simultaneously
 - Intelligent thread allocation for OCR optimization
 - NC breach notification analysis for compliance
+- UNC-System data classification for document protection levels
 
 ## Requirements
 
@@ -189,6 +190,65 @@ The script uses an intelligent classification system to categorize breach types:
 | PII-GEN | Name with Other Sensitive Data |
 | CREDS | Credential Pairs (Username/Email + Password) |
 | HIGH-RISK | Multiple Sensitive Categories |
+
+### UNC Data Classification
+
+The PII Analyzer includes a tool for classifying documents according to the UNC-System data classification framework, which categorizes information into four tiers:
+
+- **Tier-0 Public**: Information that can be freely shared
+- **Tier-1 Internal**: Non-sensitive information, intended for internal use
+- **Tier-2 Confidential**: Sensitive information requiring protection
+- **Tier-3 Restricted**: Highly sensitive information with regulatory requirements
+
+#### Basic Usage
+
+```bash
+# Generate an executive summary of document classification
+python unc_data_classification.py analysis_results.json
+
+# Generate a detailed verbose report
+python unc_data_classification.py analysis_results.json --verbose
+
+# Save the report to a file
+python unc_data_classification.py analysis_results.json -o classification_report.txt
+
+# Generate a JSON report
+python unc_data_classification.py analysis_results.json -f json -o classification.json
+```
+
+#### Advanced Features
+
+```bash
+# Clone classified files to a separate directory
+python unc_data_classification.py analysis_results.json -c /path/to/classified_files
+
+# Filter report to only include Confidential and Restricted tiers (2+)
+python unc_data_classification.py analysis_results.json -m 2
+
+# Clone only Restricted (Tier-3) files
+python unc_data_classification.py analysis_results.json -c /path/to/restricted_only -m 3
+```
+
+#### UNC Classification Script Options
+
+```
+positional arguments:
+  report_file           Path to the PII analysis report JSON file
+
+options:
+  -h, --help            Show this help message and exit
+  -o OUTPUT, --output OUTPUT
+                        Output file path for the classification report (default: stdout)
+  -f {text,json}, --format {text,json}
+                        Output format (text or json) (default: text)
+  -t THRESHOLD, --threshold THRESHOLD
+                        Confidence threshold for entities (0.0-1.0) (default: 0.7)
+  -c CLONE-DIR, --clone-dir CLONE-DIR
+                        Directory to create cloned structure of classified files
+  -m {0,1,2,3}, --min-tier {0,1,2,3}
+                        Minimum tier to include in report and cloning (0=Public, 3=Restricted)
+  -v, --verbose         Generate detailed verbose report instead of executive summary
+```
 
 ### Redaction
 
