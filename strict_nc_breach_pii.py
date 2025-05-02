@@ -52,6 +52,17 @@ ENTITY_DISPLAY_NAMES = {
     "ACCESS_CODE": "Access Code"
 }
 
+# Classification labels for breach types
+BREACH_CLASSIFICATIONS = {
+    "NAME_WITH_SSN": "PII-SSN",           # Name with SSN
+    "NAME_WITH_FINANCIALS": "PII-FIN",    # Name with financial info
+    "NAME_WITH_GOV_ID": "PII-GOV",        # Name with government ID
+    "NAME_WITH_HEALTH": "PII-MED",        # Name with health data
+    "NAME_WITH_OTHER": "PII-GEN",         # Name with other sensitive data
+    "CREDENTIALS": "CREDS",               # Credential pairs
+    "MULTIPLE": "HIGH-RISK"               # Multiple breach types
+}
+
 # Threshold values for high confidence PII
 HIGH_CONFIDENCE_THRESHOLD = 0.7
 
@@ -76,6 +87,54 @@ def breach_trigger(entity_set: set[str]) -> bool:
     )
 
     return (has_name and has_sensitive) or credential_pair
+
+def classify_breach(entity_types: set[str]) -> str:
+    """
+    Classify the breach type based on entity types present.
+    Returns a concise classification label.
+    """
+    has_name = "PERSON" in entity_types or ("FIRST_NAME" in entity_types and "LAST_NAME" in entity_types)
+    has_credential_pair = (
+        ("EMAIL_ADDRESS" in entity_types or "USERNAME" in entity_types)
+        and ("PASSWORD" in entity_types or "ACCESS_CODE" in entity_types)
+    )
+    
+    classifications = []
+    
+    # Check for credentials
+    if has_credential_pair:
+        classifications.append(BREACH_CLASSIFICATIONS["CREDENTIALS"])
+    
+    # Only check for PII combinations if we have a name
+    if has_name:
+        # Check for SSN
+        if "US_SSN" in entity_types or "US_SOCIAL_SECURITY_NUMBER" in entity_types:
+            classifications.append(BREACH_CLASSIFICATIONS["NAME_WITH_SSN"])
+        
+        # Check for financial information
+        if any(et in entity_types for et in ["CREDIT_CARD", "BANK_ACCOUNT", "US_BANK_NUMBER", "IBAN_CODE", "US_BANK_ROUTING"]):
+            classifications.append(BREACH_CLASSIFICATIONS["NAME_WITH_FINANCIALS"])
+        
+        # Check for government IDs
+        if any(et in entity_types for et in ["US_DRIVER_LICENSE", "US_PASSPORT"]):
+            classifications.append(BREACH_CLASSIFICATIONS["NAME_WITH_GOV_ID"])
+        
+        # Check for health information
+        if any(et in entity_types for et in ["MEDICAL_RECORD_NUMBER", "HEALTH_INSURANCE_POLICY_NUMBER"]):
+            classifications.append(BREACH_CLASSIFICATIONS["NAME_WITH_HEALTH"])
+        
+        # If name with sensitive info but none of the above specific categories
+        has_other_sensitive = bool(entity_types & SENSITIVE_TYPES) and len(classifications) == 0
+        if has_other_sensitive:
+            classifications.append(BREACH_CLASSIFICATIONS["NAME_WITH_OTHER"])
+    
+    # If multiple classifications, use HIGH-RISK
+    if len(classifications) > 1:
+        return BREACH_CLASSIFICATIONS["MULTIPLE"]
+    elif len(classifications) == 1:
+        return classifications[0]
+    else:
+        return "UNKNOWN"  # This should not happen given our breach_trigger logic
 
 def analyze_pii_report(report_path, threshold=HIGH_CONFIDENCE_THRESHOLD):
     """
@@ -126,6 +185,71 @@ def analyze_pii_report(report_path, threshold=HIGH_CONFIDENCE_THRESHOLD):
     
     return breach_files
 
+def generate_executive_summary(high_risk_files):
+    """Generate a concise executive summary report of high-risk files."""
+    output = []
+    output.append(f"NC §75-61 BREACH NOTIFICATION EXECUTIVE SUMMARY")
+    output.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    output.append(f"Files Found: {len(high_risk_files)}")
+    output.append("-" * 80)
+    output.append(f"{'CLASSIFICATION':<12} {'ENTITIES':<8} {'FILE PATH':<60}")
+    output.append("-" * 80)
+    
+    # For sorting based on classification severity - ordered from most to least severe
+    severity_order = {
+        "HIGH-RISK": 1,
+        "PII-SSN": 2,
+        "PII-FIN": 3,
+        "PII-GOV": 4,
+        "PII-MED": 5,
+        "PII-GEN": 6,
+        "CREDS": 7,
+        "UNKNOWN": 8
+    }
+    
+    # Process and collect file data for sorted output
+    file_data = []
+    for file_path, entities in high_risk_files.items():
+        entity_types = {entity['type'] for entity in entities}
+        classification = classify_breach(entity_types)
+        file_data.append((classification, len(entities), file_path, severity_order.get(classification, 9)))
+    
+    # Sort by classification severity then by entity count (descending)
+    sorted_files = sorted(file_data, key=lambda x: (x[3], -x[1]))
+    
+    # Generate the report lines
+    for classification, entity_count, file_path, _ in sorted_files:
+        # Truncate path if too long
+        if len(file_path) > 59:
+            display_path = "..." + file_path[-56:]
+        else:
+            display_path = file_path
+            
+        output.append(f"{classification:<12} {entity_count:<8} {display_path}")
+    
+    # Add summary statistics
+    output.append("-" * 80)
+    classification_counts = defaultdict(int)
+    for classification, _, _, _ in sorted_files:
+        classification_counts[classification] += 1
+    
+    output.append("Classification Summary:")
+    for classification, count in sorted(classification_counts.items(), 
+                                        key=lambda x: severity_order.get(x[0], 9)):
+        output.append(f"  {classification:<12}: {count} files")
+    
+    output.append("-" * 80)
+    output.append(f"LEGEND:")
+    output.append(f"  PII-SSN: Name with Social Security Number")
+    output.append(f"  PII-FIN: Name with Financial Information")
+    output.append(f"  PII-GOV: Name with Government ID")
+    output.append(f"  PII-MED: Name with Health Information")
+    output.append(f"  PII-GEN: Name with Other Sensitive Data")
+    output.append(f"  CREDS:   Credential Pairs (Username/Email + Password)")
+    output.append(f"  HIGH-RISK: Multiple Sensitive Categories")
+    
+    return "\n".join(output)
+
 def generate_report_text(high_risk_files):
     """Generate a human-readable text report of high-risk files."""
     output = []
@@ -140,6 +264,11 @@ def generate_report_text(high_risk_files):
         output.append(f"File: {file_path}")
         output.append(f"Number of entities: {len(entities)}")
         
+        # Get classification
+        entity_types = {entity['type'] for entity in entities}
+        classification = classify_breach(entity_types)
+        output.append(f"Classification: {classification}")
+        
         # Count entity types
         entity_counts = defaultdict(int)
         for entity in entities:
@@ -150,7 +279,6 @@ def generate_report_text(high_risk_files):
             output.append(f"  - {category}: {count}")
         
         # Extract the set of entity types for this file to explain trigger
-        entity_types = {entity['type'] for entity in entities}
         output.append("Breach notification trigger reason:")
         has_name = "PERSON" in entity_types or ("FIRST_NAME" in entity_types and "LAST_NAME" in entity_types)
         has_sensitive = bool(entity_types & SENSITIVE_TYPES)
@@ -224,10 +352,14 @@ def generate_report_json(high_risk_files):
         if credential_pair:
             breach_reasons.append("credential_pair")
         
+        # Add classification
+        classification = classify_breach(entity_types)
+        
         # Add to the report
         report["breach_files"][file_path] = {
             "entity_count": len(entities),
             "entity_types": list(entity_types),
+            "classification": classification,
             "breach_reasons": breach_reasons,
             "entities_by_type": dict(entity_by_type)
         }
@@ -331,6 +463,12 @@ def parse_arguments():
         help="Directory to create cloned structure of high-risk files"
     )
     
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Generate detailed verbose report instead of executive summary"
+    )
+    
     args = parser.parse_args()
     
     # Validate that the report file exists
@@ -352,7 +490,10 @@ def main():
     
     # Generate the report
     if args.format == "text":
-        report = generate_report_text(high_risk_files)
+        if args.verbose:
+            report = generate_report_text(high_risk_files)
+        else:
+            report = generate_executive_summary(high_risk_files)
     else:  # json
         report = generate_report_json(high_risk_files)
     
