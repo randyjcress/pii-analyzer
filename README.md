@@ -112,11 +112,83 @@ python pii_analyzer_parallel.py -i path/to/directory -o output.json --workers 8
 
 ### NC Breach Analysis
 
-After generating analysis results:
+The PII Analyzer includes a specialized tool for North Carolina breach notification compliance (§75-61) that analyzes PII detection results to identify files that would trigger breach notification requirements.
+
+#### Basic Usage
 
 ```bash
+# Generate an executive summary report
 python strict_nc_breach_pii.py analysis_results.json
+
+# Generate a detailed verbose report
+python strict_nc_breach_pii.py analysis_results.json --verbose
+
+# Save the report to a file
+python strict_nc_breach_pii.py analysis_results.json -o breach_report.txt
+
+# Generate a JSON report
+python strict_nc_breach_pii.py analysis_results.json -f json -o breach_report.json
 ```
+
+#### Advanced Features
+
+```bash
+# Clone high-risk files to a separate directory while maintaining file structure
+python strict_nc_breach_pii.py analysis_results.json -c /path/to/high_risk_files
+
+# Adjust confidence threshold for entities
+python strict_nc_breach_pii.py analysis_results.json -t 0.8
+
+# Full example with multiple options
+python strict_nc_breach_pii.py analysis_results.json -f json -o breach_report.json -t 0.75 -c /path/to/high_risk_files -v
+```
+
+#### NC Breach Script Options
+
+```
+positional arguments:
+  report_file           Path to the PII analysis report JSON file
+
+options:
+  -h, --help            Show this help message and exit
+  -o OUTPUT, --output OUTPUT
+                        Output file path for the breach report (default: stdout)
+  -f {text,json}, --format {text,json}
+                        Output format (text or json) (default: text)
+  -t THRESHOLD, --threshold THRESHOLD
+                        Confidence threshold for entities (0.0-1.0) (default: 0.7)
+  -c CLONE-DIR, --clone-dir CLONE-DIR
+                        Directory to create cloned structure of high-risk files
+  -v, --verbose         Generate detailed verbose report instead of executive summary
+```
+
+#### Report Features
+
+The NC breach notification script provides two reporting formats:
+
+1. **Executive Summary Report** (default):
+   - Concise overview of breach notification findings
+   - Document set statistics showing file types and counts
+   - Tabular listing of high-risk files with risk classification
+   - Summary statistics by classification category
+   
+2. **Detailed Verbose Report** (with `-v` flag):
+   - Comprehensive analysis of each high-risk file
+   - Detailed entity information with counts
+   - Breach trigger explanation and reasoning
+   - Sample of masked entities found in each file
+
+The script uses an intelligent classification system to categorize breach types:
+
+| Classification | Description |
+|---------------|-------------|
+| PII-SSN | Name with Social Security Number |
+| PII-FIN | Name with Financial Information |
+| PII-GOV | Name with Government ID |
+| PII-MED | Name with Health Information |
+| PII-GEN | Name with Other Sensitive Data |
+| CREDS | Credential Pairs (Username/Email + Password) |
+| HIGH-RISK | Multiple Sensitive Categories |
 
 ### Redaction
 
