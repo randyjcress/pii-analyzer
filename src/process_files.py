@@ -373,6 +373,12 @@ def process_directory(args):
         'debug': args.debug
     }
     
+    # Check if this is a run after a database reset
+    is_after_db_reset = False
+    if hasattr(args, 'after_db_reset') and args.after_db_reset:
+        is_after_db_reset = True
+        logger.info("Running after database reset, will skip file registration")
+
     # Handle force restart option
     if args.force_restart:
         # Look for an existing job for this directory
@@ -414,39 +420,52 @@ def process_directory(args):
             logger.info(f"Scanned directory: found {total} files, registered {new} new files")
     
     # Check for resumable job
-    elif args.resume:
+    elif args.resume or is_after_db_reset:
         # Look for an existing job for this directory
         existing_jobs = db.get_jobs_by_metadata('directory', args.directory)
         
         if existing_jobs:
             job_id = existing_jobs[0]['job_id']
             
-            # Check if job can be resumed
-            info = find_resumption_point(db, job_id)
-            
-            if info['status'] == 'resumable':
-                logger.info(f"Resuming job {job_id}: {info['message']}")
+            if is_after_db_reset:
+                logger.info(f"Using existing job {job_id} after database reset")
                 
-                # Reset any stalled files
-                reset_count = reset_stalled_files(db, job_id)
-                if reset_count > 0:
-                    logger.info(f"Reset {reset_count} stalled files to pending status")
-            else:
-                # Create new job
-                job_id = db.create_job(
-                    name=f"PII Analysis - {os.path.basename(args.directory)}",
-                    metadata={'directory': args.directory}
-                )
-                logger.info(f"Created new job {job_id} (previous job cannot be resumed: {info['message']})")
-                
-                # Scan directory
+                # Scan directory but skip registration after DB reset
                 total, new = scan_directory(
                     args.directory,
                     db,
                     job_id,
-                    supported_extensions=extensions
+                    supported_extensions=extensions,
+                    skip_registration=True
                 )
-                logger.info(f"Scanned directory: found {total} files, registered {new} new files")
+                logger.info(f"Scanned directory after DB reset: found {total} files (skipped registration)")
+            else:
+                # Check if job can be resumed
+                info = find_resumption_point(db, job_id)
+                
+                if info['status'] == 'resumable':
+                    logger.info(f"Resuming job {job_id}: {info['message']}")
+                    
+                    # Reset any stalled files
+                    reset_count = reset_stalled_files(db, job_id)
+                    if reset_count > 0:
+                        logger.info(f"Reset {reset_count} stalled files to pending status")
+                else:
+                    # Create new job
+                    job_id = db.create_job(
+                        name=f"PII Analysis - {os.path.basename(args.directory)}",
+                        metadata={'directory': args.directory}
+                    )
+                    logger.info(f"Created new job {job_id} (previous job cannot be resumed: {info['message']})")
+                    
+                    # Scan directory
+                    total, new = scan_directory(
+                        args.directory,
+                        db,
+                        job_id,
+                        supported_extensions=extensions
+                    )
+                    logger.info(f"Scanned directory: found {total} files, registered {new} new files")
         else:
             # No existing job, create new one
             job_id = db.create_job(
@@ -807,8 +826,11 @@ def reset_database(db_path: str):
         # Close database
         db.close()
         
+        return reset_count
+        
     except Exception as e:
         console.print(f"[bold red]Error resetting database:[/bold red] {str(e)}")
+        return 0
 
 def main():
     """Main entry point"""
@@ -837,7 +859,14 @@ def main():
     
     # Handle --reset-db option
     if args.reset_db:
-        reset_database(args.db_path)
+        reset_count = reset_database(args.db_path)
+        
+        # If user also specified a directory, immediately process it after reset
+        if args.directory and reset_count > 0:
+            console.print("\n[bold green]Continuing with processing files...[/bold green]")
+            # Set a flag that we're running after a database reset
+            args.after_db_reset = True
+            process_directory(args)
         return
     
     # Make sure directory is specified for all other operations
