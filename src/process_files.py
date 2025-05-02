@@ -86,6 +86,9 @@ Examples:
   
   # List all detached processes
   python src/process_files.py --list-detached
+  
+  # Reset all files in database to pending status (keeps file records)
+  python src/process_files.py --db-path results.db --reset-db
 """
     )
     
@@ -99,6 +102,8 @@ Examples:
                         help='Resume processing from last point')
     parser.add_argument('--force-restart', action='store_true',
                         help='Force restart of processing')
+    parser.add_argument('--reset-db', action='store_true',
+                        help='Reset all files to pending status (keeps file records)')
     parser.add_argument('--workers', type=int, default=None,
                         help='Number of worker threads (default: auto)')
     parser.add_argument('--batch-size', type=int, default=10,
@@ -777,6 +782,34 @@ def list_detached_processes():
     console.print("or")
     console.print("[dim]  python src/process_files.py --follow <timestamp>[/dim]")
 
+def reset_database(db_path: str):
+    """
+    Reset all files in the database to pending status.
+    
+    Args:
+        db_path: Path to the database file
+    """
+    try:
+        # Connect to database
+        db = get_database(db_path)
+        
+        # Reset all files
+        reset_count = db.reset_all_files()
+        
+        # Display results
+        console.print(f"[bold green]Database Reset Complete[/bold green]")
+        console.print(f"Reset {reset_count} files to pending status")
+        console.print("All entity data and results have been cleared")
+        console.print("All job counters have been reset to 0")
+        console.print("\nYou can now process the files again with:")
+        console.print(f"[dim]  python src/process_files.py /path/to/directory --db-path {db_path}[/dim]")
+        
+        # Close database
+        db.close()
+        
+    except Exception as e:
+        console.print(f"[bold red]Error resetting database:[/bold red] {str(e)}")
+
 def main():
     """Main entry point"""
     # Parse arguments
@@ -802,9 +835,14 @@ def main():
         list_detached_processes()
         return
     
-    # Make sure directory is specified
+    # Handle --reset-db option
+    if args.reset_db:
+        reset_database(args.db_path)
+        return
+    
+    # Make sure directory is specified for all other operations
     if not args.directory:
-        console.print("[bold red]Error:[/bold red] Directory must be specified unless using --status, --export, --follow, or --list-detached")
+        console.print("[bold red]Error:[/bold red] Directory must be specified unless using --status, --export, --follow, --reset-db, or --list-detached")
         console.print("Run with --help for usage information")
         return
     

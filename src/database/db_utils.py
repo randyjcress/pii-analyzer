@@ -1022,6 +1022,58 @@ class PIIDatabase:
             logger.error(f"Error clearing files for job {job_id}: {e}")
             return 0
 
+    def reset_all_files(self) -> int:
+        """
+        Reset all files in the database to 'pending' status without deleting them.
+        Also resets all job counters.
+        
+        Returns:
+            Number of files reset
+        """
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                
+                # Reset all files to pending
+                cursor.execute("""
+                UPDATE files 
+                SET status = 'pending', process_start = NULL, process_end = NULL, error_message = NULL
+                """)
+                
+                reset_count = cursor.rowcount
+                
+                # Get all job IDs
+                cursor.execute("SELECT job_id FROM jobs")
+                job_ids = [row['job_id'] for row in cursor.fetchall()]
+                
+                # Reset job counters for all jobs
+                for job_id in job_ids:
+                    cursor.execute("""
+                    UPDATE jobs 
+                    SET processed_files = 0, error_files = 0, status = 'created', last_updated = ?
+                    WHERE job_id = ?
+                    """, (datetime.now(), job_id))
+                
+                logger.info(f"Reset {reset_count} files to 'pending' status across all jobs")
+                
+                # Also delete all results and entities (they'll be recreated during processing)
+                # First get all result IDs
+                cursor.execute("SELECT result_id FROM results")
+                result_ids = [row['result_id'] for row in cursor.fetchall()]
+                
+                # Delete all entities
+                if result_ids:
+                    cursor.execute("DELETE FROM entities")
+                
+                # Delete all results
+                cursor.execute("DELETE FROM results")
+                
+                return reset_count
+                
+        except sqlite3.Error as e:
+            logger.error(f"Error resetting all files: {e}")
+            return 0
+
 
 # Factory function to get a database instance
 def get_database(db_path: str = 'pii_analysis.db') -> PIIDatabase:
