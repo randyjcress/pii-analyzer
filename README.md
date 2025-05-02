@@ -16,7 +16,7 @@ A robust, extensible pipeline for extracting text from various file formats, det
 
 ## Architecture
 
-![PII Analyzer Architecture](docs/architecture.png)
+![PII Analyzer Architecture](architecture.png)
 
 ```
 File Input → Text Extraction → PII Analysis → Anonymization → Output
