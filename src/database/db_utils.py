@@ -968,6 +968,60 @@ class PIIDatabase:
             logger.error(f"Error getting file results with entities: {e}")
             return []
 
+    def clear_files_for_job(self, job_id: int) -> int:
+        """
+        Clear all files for a job to allow for a forced restart.
+        This deletes all files, results, and entities associated with the job.
+        
+        Args:
+            job_id: Job ID to clear files for
+            
+        Returns:
+            Number of files deleted
+        """
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                
+                # Get all file IDs for the job
+                cursor.execute("SELECT file_id FROM files WHERE job_id = ?", (job_id,))
+                file_ids = [row['file_id'] for row in cursor.fetchall()]
+                
+                # Get all result IDs for these files
+                if file_ids:
+                    placeholders = ', '.join(['?'] * len(file_ids))
+                    cursor.execute(f"SELECT result_id FROM results WHERE file_id IN ({placeholders})", file_ids)
+                    result_ids = [row['result_id'] for row in cursor.fetchall()]
+                    
+                    # Delete entities for these results
+                    if result_ids:
+                        entity_placeholders = ', '.join(['?'] * len(result_ids))
+                        cursor.execute(f"DELETE FROM entities WHERE result_id IN ({entity_placeholders})", result_ids)
+                    
+                    # Delete results for these files
+                    cursor.execute(f"DELETE FROM results WHERE file_id IN ({placeholders})", file_ids)
+                
+                # Count how many files we'll delete
+                cursor.execute("SELECT COUNT(*) as count FROM files WHERE job_id = ?", (job_id,))
+                count = cursor.fetchone()['count']
+                
+                # Delete all files for this job
+                cursor.execute("DELETE FROM files WHERE job_id = ?", (job_id,))
+                
+                # Reset job counters
+                cursor.execute("""
+                UPDATE jobs 
+                SET total_files = 0, processed_files = 0, error_files = 0, status = 'running', last_updated = ?
+                WHERE job_id = ?
+                """, (datetime.now(), job_id))
+                
+                logger.info(f"Cleared {count} files for job {job_id} (force restart)")
+                return count
+                
+        except sqlite3.Error as e:
+            logger.error(f"Error clearing files for job {job_id}: {e}")
+            return 0
+
 
 # Factory function to get a database instance
 def get_database(db_path: str = 'pii_analysis.db') -> PIIDatabase:

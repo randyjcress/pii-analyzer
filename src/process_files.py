@@ -368,8 +368,48 @@ def process_directory(args):
         'debug': args.debug
     }
     
+    # Handle force restart option
+    if args.force_restart:
+        # Look for an existing job for this directory
+        existing_jobs = db.get_jobs_by_metadata('directory', args.directory)
+        
+        if existing_jobs:
+            job_id = existing_jobs[0]['job_id']
+            logger.info(f"Force restarting job {job_id} for directory {args.directory}")
+            
+            # Clear all files for the job
+            cleared_files = db.clear_files_for_job(job_id)
+            
+            if cleared_files > 0:
+                logger.info(f"Cleared {cleared_files} files for forced restart")
+            
+            # Scan directory with fresh slate
+            total, new = scan_directory(
+                args.directory,
+                db,
+                job_id,
+                supported_extensions=extensions
+            )
+            logger.info(f"Rescanned directory: found {total} files, registered {new} new files")
+        else:
+            # No existing job, create new one
+            job_id = db.create_job(
+                name=f"PII Analysis - {os.path.basename(args.directory)}",
+                metadata={'directory': args.directory}
+            )
+            logger.info(f"Created new job {job_id} for force restart (no existing job found)")
+            
+            # Scan directory
+            total, new = scan_directory(
+                args.directory,
+                db,
+                job_id,
+                supported_extensions=extensions
+            )
+            logger.info(f"Scanned directory: found {total} files, registered {new} new files")
+    
     # Check for resumable job
-    if args.resume:
+    elif args.resume:
         # Look for an existing job for this directory
         existing_jobs = db.get_jobs_by_metadata('directory', args.directory)
         
