@@ -185,12 +185,67 @@ def analyze_pii_report(report_path, threshold=HIGH_CONFIDENCE_THRESHOLD):
     
     return breach_files
 
-def generate_executive_summary(high_risk_files):
+def generate_executive_summary(high_risk_files, original_report_path=None):
     """Generate a concise executive summary report of high-risk files."""
     output = []
     output.append(f"NC §75-61 BREACH NOTIFICATION EXECUTIVE SUMMARY")
     output.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    output.append(f"Files Found: {len(high_risk_files)}")
+    
+    # Extract file type statistics if available
+    file_type_stats = {}
+    total_files = 0
+    
+    # Try to extract file type information from the original report
+    if original_report_path and os.path.exists(original_report_path):
+        try:
+            with open(original_report_path, 'r') as f:
+                data = json.load(f)
+                
+                # Count file types from all files in the report
+                if 'results' in data:
+                    for result in data.get('results', []):
+                        file_path = result.get('file_path', '')
+                        if file_path:
+                            ext = os.path.splitext(file_path)[1].lower()
+                            if ext:
+                                # Normalize the extension (remove dot, handle jpeg/jpg)
+                                ext = ext[1:]  # Remove the dot
+                                if ext == 'jpeg':
+                                    ext = 'jpg'
+                                file_type_stats[ext] = file_type_stats.get(ext, 0) + 1
+                                total_files += 1
+                
+                # If the report has file_type_stats, use those instead
+                if 'file_type_stats' in data and isinstance(data['file_type_stats'], dict):
+                    success_stats = data.get('file_type_stats', {}).get('success', {})
+                    for ext, count in success_stats.items():
+                        # Normalize extension (remove the dot)
+                        ext = ext.lstrip('.').lower()
+                        if ext == 'jpeg':
+                            ext = 'jpg'
+                        file_type_stats[ext] = file_type_stats.get(ext, 0) + count
+                        
+                    # If we have a total_files count in the report, use that
+                    if 'total_files' in data and isinstance(data['total_files'], int):
+                        total_files = data['total_files']
+                    else:
+                        total_files = sum(success_stats.values())
+                        
+        except Exception as e:
+            # If there's an error, don't add file type stats
+            print(f"Warning: Could not extract file type statistics: {e}")
+            file_type_stats = {}
+
+    # Display file type statistics if available
+    if file_type_stats:
+        output.append(f"Document Set Summary:")
+        output.append(f"Total files processed: {total_files}")
+        
+        output.append(f"File types:")
+        for ext, count in sorted(file_type_stats.items(), key=lambda x: x[1], reverse=True):
+            output.append(f"  .{ext}: {count}")
+    
+    output.append(f"Files Found with PII: {len(high_risk_files)}")
     output.append("-" * 80)
     output.append(f"{'CLASSIFICATION':<12} {'ENTITIES':<8} {'FILE PATH':<60}")
     output.append("-" * 80)
@@ -493,7 +548,7 @@ def main():
         if args.verbose:
             report = generate_report_text(high_risk_files)
         else:
-            report = generate_executive_summary(high_risk_files)
+            report = generate_executive_summary(high_risk_files, args.report_file)
     else:  # json
         report = generate_report_json(high_risk_files)
     
