@@ -1,318 +1,155 @@
-# PII Analyzer
+# PII Analysis System with Resumable Processing
 
-A robust, extensible pipeline for extracting text from various file formats, detecting Personally Identifiable Information (PII), and performing redaction.
+A comprehensive system for analyzing files for Personally Identifiable Information (PII) with support for resumable processing of large document sets.
+
+## Overview
+
+This project enhances the PII Analyzer with persistent storage and resumable processing capabilities, allowing it to handle extremely large document sets (100,000+ files) efficiently. The system uses SQLite as the storage mechanism to track processing state and store results, enabling it to resume analysis after interruption without duplicating work.
 
 ## Features
 
-- Text extraction from multiple file formats (DOCX, XLSX, CSV, RTF, PDF, JPG, PNG, TIFF)
-- Automatic OCR fallback for image-based files
-- PII detection using Microsoft Presidio
-- Anonymization of detected PII
-- Command-line interface for processing files individually or in batch
-- Enhanced CLI with better handling for DOCX files
-- Multi-threaded processing for handling multiple files simultaneously
-- Intelligent thread allocation for OCR optimization
-- NC breach notification analysis for compliance
-- UNC-System data classification for document protection levels
+- **Resumable Processing**: Continue processing from where you left off if interrupted
+- **Parallel Processing**: Efficient multi-threaded processing with thread-safe database access
+- **Persistent Storage**: SQLite database for storing all processing results
+- **Progress Tracking**: Real-time progress tracking with estimated completion time
+- **File Classification**: Automatic file type detection and classification
+- **Detailed Reporting**: Comprehensive statistics on processed files and found entities
+- **Export Capabilities**: Export results to JSON format for compatibility with other tools
+- **Command-Line Interface**: Robust CLI with many customization options
 
-## Requirements
+## Getting Started
 
-- Python 3.11+
-- Docker (for Apache Tika)
-- Tesseract OCR
+### Prerequisites
 
-## Installation
+- Python 3.6+
+- Required Python packages:
+  - sqlite3 (standard library)
+  - concurrent.futures (standard library)
+  - argparse (standard library)
 
-For detailed installation instructions on Ubuntu, see [ubuntu_installation.md](ubuntu_installation.md).
+### Installation
 
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/randyjcress/pii-analyzer.git
-cd pii-analyzer
-```
-
-### 2. Create a virtual environment
+Clone the repository and navigate to the project directory:
 
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+git clone https://github.com/yourusername/pii-analysis.git
+cd pii-analysis
 ```
-
-### 3. Install the package
-
-You can install the package in one of two ways:
-
-#### Option A: Install for development
-
-```bash
-pip install -e .
-```
-
-This installs the package in development mode, allowing you to modify the code and see changes immediately.
-
-#### Option B: Install from the repository
-
-```bash
-pip install .
-```
-
-### 4. Install Spacy language model
-
-```bash
-python -m spacy download en_core_web_lg
-```
-
-### 5. Configure environment variables
-
-```bash
-cp .env-template .env
-```
-
-Edit the `.env` file to adjust settings as needed.
-
-### 6. Start Apache Tika Docker container
-
-```bash
-docker-compose up -d
-```
-
-## Usage
 
 ### Basic Usage
 
-```bash
-# Run the main PII analyzer
-pii-analyzer -i path/to/file.pdf -o results.json
-
-# You can also run the script directly
-python pii_analyzer.py -i path/to/file.pdf -o results.json
-```
-
-### Batch Processing
+Process a directory for PII:
 
 ```bash
-# Now uses parallel processing by default for directories
-pii-analyzer -i path/to/directory -o output.json
-
-# Force sequential processing if needed
-pii-analyzer -i path/to/directory -o output.json --sequential
+python src/process_files.py /path/to/documents --db-path results.db
 ```
 
-### Explicitly Using Parallel Processing
-
-If you need more control over the parallel processing:
+Resume processing after interruption:
 
 ```bash
-# Explicitly specify parallel processing with custom worker count
-pii-analyzer-parallel -i path/to/directory -o output.json --workers 8
-
-# Or using the script directly
-python pii_analyzer_parallel.py -i path/to/directory -o output.json --workers 8
+python src/process_files.py /path/to/documents --db-path results.db --resume
 ```
 
-### NC Breach Analysis
-
-The PII Analyzer includes a specialized tool for North Carolina breach notification compliance (§75-61) that analyzes PII detection results to identify files that would trigger breach notification requirements.
-
-#### Basic Usage
+Process with 8 worker threads:
 
 ```bash
-# Generate an executive summary report
-python strict_nc_breach_pii.py analysis_results.json
-
-# Generate a detailed verbose report
-python strict_nc_breach_pii.py analysis_results.json --verbose
-
-# Save the report to a file
-python strict_nc_breach_pii.py analysis_results.json -o breach_report.txt
-
-# Generate a JSON report
-python strict_nc_breach_pii.py analysis_results.json -f json -o breach_report.json
+python src/process_files.py /path/to/documents --workers 8
 ```
 
-#### Advanced Features
+Export results to JSON:
 
 ```bash
-# Clone high-risk files to a separate directory while maintaining file structure
-python strict_nc_breach_pii.py analysis_results.json -c /path/to/high_risk_files
-
-# Adjust confidence threshold for entities
-python strict_nc_breach_pii.py analysis_results.json -t 0.8
-
-# Full example with multiple options
-python strict_nc_breach_pii.py analysis_results.json -f json -o breach_report.json -t 0.75 -c /path/to/high_risk_files -v
+python src/process_files.py --db-path results.db --export results.json
 ```
 
-#### NC Breach Script Options
-
-```
-positional arguments:
-  report_file           Path to the PII analysis report JSON file
-
-options:
-  -h, --help            Show this help message and exit
-  -o OUTPUT, --output OUTPUT
-                        Output file path for the breach report (default: stdout)
-  -f {text,json}, --format {text,json}
-                        Output format (text or json) (default: text)
-  -t THRESHOLD, --threshold THRESHOLD
-                        Confidence threshold for entities (0.0-1.0) (default: 0.7)
-  -c CLONE-DIR, --clone-dir CLONE-DIR
-                        Directory to create cloned structure of high-risk files
-  -v, --verbose         Generate detailed verbose report instead of executive summary
-```
-
-#### Report Features
-
-The NC breach notification script provides two reporting formats:
-
-1. **Executive Summary Report** (default):
-   - Concise overview of breach notification findings
-   - Document set statistics showing file types and counts
-   - Tabular listing of high-risk files with risk classification
-   - Summary statistics by classification category
-   
-2. **Detailed Verbose Report** (with `-v` flag):
-   - Comprehensive analysis of each high-risk file
-   - Detailed entity information with counts
-   - Breach trigger explanation and reasoning
-   - Sample of masked entities found in each file
-
-The script uses an intelligent classification system to categorize breach types:
-
-| Classification | Description |
-|---------------|-------------|
-| PII-SSN | Name with Social Security Number |
-| PII-FIN | Name with Financial Information |
-| PII-GOV | Name with Government ID |
-| PII-MED | Name with Health Information |
-| PII-GEN | Name with Other Sensitive Data |
-| CREDS | Credential Pairs (Username/Email + Password) |
-| HIGH-RISK | Multiple Sensitive Categories |
-
-### UNC Data Classification
-
-The PII Analyzer includes a tool for classifying documents according to the UNC-System data classification framework, which categorizes information into four tiers:
-
-- **Tier-0 Public**: Information that can be freely shared
-- **Tier-1 Internal**: Non-sensitive information, intended for internal use
-- **Tier-2 Confidential**: Sensitive information requiring protection
-- **Tier-3 Restricted**: Highly sensitive information with regulatory requirements
-
-#### Basic Usage
+Show job status:
 
 ```bash
-# Generate an executive summary of document classification
-python unc_data_classification.py analysis_results.json
-
-# Generate a detailed verbose report
-python unc_data_classification.py analysis_results.json --verbose
-
-# Save the report to a file
-python unc_data_classification.py analysis_results.json -o classification_report.txt
-
-# Generate a JSON report
-python unc_data_classification.py analysis_results.json -f json -o classification.json
+python src/process_files.py --db-path results.db --status
 ```
 
-#### Advanced Features
+For more options:
 
 ```bash
-# Clone classified files to a separate directory
-python unc_data_classification.py analysis_results.json -c /path/to/classified_files
-
-# Filter report to only include Confidential and Restricted tiers (2+)
-python unc_data_classification.py analysis_results.json -m 2
-
-# Clone only Restricted (Tier-3) files
-python unc_data_classification.py analysis_results.json -c /path/to/restricted_only -m 3
+python src/process_files.py --help
 ```
 
-#### UNC Classification Script Options
+## Architecture
 
-```
-positional arguments:
-  report_file           Path to the PII analysis report JSON file
+The system consists of several key components:
 
-options:
-  -h, --help            Show this help message and exit
-  -o OUTPUT, --output OUTPUT
-                        Output file path for the classification report (default: stdout)
-  -f {text,json}, --format {text,json}
-                        Output format (text or json) (default: text)
-  -t THRESHOLD, --threshold THRESHOLD
-                        Confidence threshold for entities (0.0-1.0) (default: 0.7)
-  -c CLONE-DIR, --clone-dir CLONE-DIR
-                        Directory to create cloned structure of classified files
-  -m {0,1,2,3}, --min-tier {0,1,2,3}
-                        Minimum tier to include in report and cloning (0=Public, 3=Restricted)
-  -v, --verbose         Generate detailed verbose report instead of executive summary
-```
+1. **Database Utilities** (`src/database/db_utils.py`): 
+   - SQLite database connection and management
+   - Schema creation and version management
+   - Query and transaction functionality
 
-### Redaction
+2. **File Discovery** (`src/core/file_discovery.py`):
+   - Directory scanning and file registration
+   - File filtering by type/extension
+   - Resumption point detection
+   - Status management
 
-For redaction functionality, use the src.cli directly:
+3. **Worker Management** (`src/core/worker_management.py`):
+   - Thread-safe parallel processing
+   - Progress tracking and reporting
+   - Result storage coordination
+
+4. **Command-Line Interface** (`src/process_files.py`):
+   - User-facing command-line tool
+   - Job management and control
+   - Status reporting and export functionality
+
+## Database Schema
+
+The SQLite database schema includes the following tables:
+
+- `jobs`: Job metadata and overall status
+- `job_metadata`: Additional metadata for jobs
+- `files`: Individual file information and processing status
+- `results`: Processing results for each file
+- `entities`: Individual PII entities found in files
+
+## Advanced Usage
+
+### Processing Specific File Types
+
+Limit processing to specific file extensions:
 
 ```bash
-python -m src.cli redact --input path/to/file.pdf --output redacted.txt
+python src/process_files.py /path/to/documents --extensions txt,pdf,docx
 ```
 
-### Options
+### Limiting Processing
 
-```
---input, -i          Input file or directory
---output, -o         Output file or directory
---entities, -e       Comma-separated list of entities to detect (default: all)
---threshold, -t      Confidence threshold (0-1, default: 0.7)
---debug              Show detailed debug information
---ocr                Force OCR for text extraction
---ocr-dpi            DPI for OCR
---ocr-threads        Number of OCR threads (0=auto)
---max-pages          Maximum pages per PDF
---sample             Analyze only a sample of files
---workers            Number of parallel worker threads (0=auto, parallel processor only)
+Process only a specific number of files:
+
+```bash
+python src/process_files.py /path/to/documents --max-files 1000
 ```
 
-## Performance Optimization
+### Batch Size Control
 
-The PII Analyzer offers two levels of thread optimization:
+Adjust the batch size for processing:
 
-1. **OCR Thread Optimization**: Within the OCR extractor, threads are optimized based on file size, available memory, and CPU cores to efficiently process individual documents with multiple pages.
-
-2. **Parallel File Processing**: Using `pii_analyzer_parallel.py`, multiple files can be processed simultaneously, each with its own OCR thread optimization, significantly reducing processing time for large collections of documents.
-
-## Development
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and contribution guidelines.
-
-### Project Structure
-
+```bash
+python src/process_files.py /path/to/documents --batch-size 50
 ```
-pii-analysis/
-├── src/
-│   ├── extractors/      # Text extraction modules
-│   ├── analyzers/       # PII analysis modules
-│   ├── anonymizers/     # PII anonymization modules
-│   ├── utils/           # Utility functions
-│   └── cli.py           # Command-line interface
-├── tests/               # Test modules
-├── sample_files/        # Sample files for testing
-├── pii_analyzer.py      # Main entry point
-├── pii_analyzer_parallel.py  # Parallel processing entry point
-├── fix_enhanced_cli.py  # Enhanced CLI implementation
-├── strict_nc_breach_pii.py # NC breach notification analysis
-├── setup.py            # Package installation configuration
-├── requirements.txt     # Project dependencies
-└── README.md            # Project documentation
-```
+
+## Implementation Details
+
+The system is designed with the following principles:
+
+1. **Efficiency**: Minimizes repeated work through persistent tracking
+2. **Scalability**: Handles extremely large document sets through batched processing
+3. **Reliability**: Tolerates interruptions and system crashes
+4. **Thread-safety**: Uses thread-local storage for database connections
+5. **Atomicity**: Ensures database operations are atomic even with multiple workers
 
 ## License
 
-[MIT License](LICENSE)
+This project is licensed under the MIT License - see the LICENSE file for details.
 
 ## Acknowledgments
 
-- [Microsoft Presidio](https://github.com/microsoft/presidio)
-- [Apache Tika](https://tika.apache.org/)
-- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) 
+* North Carolina Breach Notification Requirements
+* UNC Data Classification Framework 
