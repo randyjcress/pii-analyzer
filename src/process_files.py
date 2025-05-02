@@ -8,6 +8,8 @@ import sys
 import argparse
 import logging
 import time
+import glob
+import re
 from typing import Dict, Any, List, Optional
 
 # Add the project root to path if needed
@@ -75,6 +77,15 @@ Examples:
   
   # Show job status
   python src/process_files.py --db-path results.db --status
+  
+  # Run in detached mode (continue even if terminal closes)
+  python src/process_files.py /path/to/documents --detach
+  
+  # Follow output of a detached process
+  python src/process_files.py --follow <pid>
+  
+  # List all detached processes
+  python src/process_files.py --list-detached
 """
     )
     
@@ -94,6 +105,12 @@ Examples:
                         help='Number of files to process in a batch')
     parser.add_argument('--max-files', type=int, default=None,
                         help='Maximum number of files to process')
+    parser.add_argument('--detach', action='store_true',
+                        help='Detach from terminal and run in the background (survive SSH disconnection)')
+    parser.add_argument('--follow', type=str, metavar='PID_OR_TIMESTAMP',
+                        help='Follow logs of a detached process (by PID or timestamp)')
+    parser.add_argument('--list-detached', action='store_true',
+                        help='List all detached processes')
     
     # File filtering
     parser.add_argument('--extensions', type=str, default=None,
@@ -518,6 +535,208 @@ def process_directory(args):
     # Close database
     db.close()
 
+def follow_process(pid_or_timestamp: str):
+    """
+    Follow the log output of a running detached process
+    
+    Args:
+        pid_or_timestamp: Process ID or timestamp of the process to follow
+    """
+    # Check if input looks like a timestamp (YYYYMMDD-HHMMSS)
+    timestamp_pattern = re.compile(r'^\d{8}-\d{6}$')
+    is_timestamp = bool(timestamp_pattern.match(pid_or_timestamp))
+    
+    # Path to logs directory
+    logs_dir = os.path.join(os.getcwd(), "logs")
+    
+    # Find the log file
+    log_file = None
+    
+    if is_timestamp:
+        # If timestamp, look for matching log file
+        log_pattern = os.path.join(logs_dir, f"pii_analysis_{pid_or_timestamp}.log")
+        matching_logs = glob.glob(log_pattern)
+        
+        if matching_logs:
+            log_file = matching_logs[0]
+        else:
+            console.print(f"[bold red]Error:[/bold red] No log file found for timestamp {pid_or_timestamp}")
+            return
+    else:
+        # Assume it's a PID, look for corresponding timestamp
+        timestamp_file = os.path.join(logs_dir, f"{pid_or_timestamp}.timestamp")
+        
+        if os.path.exists(timestamp_file):
+            # Read timestamp from file
+            with open(timestamp_file) as f:
+                timestamp = f.read().strip()
+            
+            # Use timestamp to find log file
+            log_file = os.path.join(logs_dir, f"pii_analysis_{timestamp}.log")
+            
+            if not os.path.exists(log_file):
+                console.print(f"[bold red]Error:[/bold red] Log file for PID {pid_or_timestamp} not found")
+                return
+        else:
+            # No timestamp file, search for any PID file with this PID
+            pid_files = glob.glob(os.path.join(logs_dir, "*.pid"))
+            for pid_file in pid_files:
+                with open(pid_file) as f:
+                    file_pid = f.read().strip()
+                    if file_pid == pid_or_timestamp:
+                        # Extract timestamp from filename
+                        filename = os.path.basename(pid_file)
+                        match = re.search(r'pii_analysis_(\d{8}-\d{6})\.pid', filename)
+                        if match:
+                            timestamp = match.group(1)
+                            log_file = os.path.join(logs_dir, f"pii_analysis_{timestamp}.log")
+                            break
+            
+            if not log_file:
+                console.print(f"[bold red]Error:[/bold red] No log file found for PID {pid_or_timestamp}")
+                return
+    
+    # Check if process is still running
+    process_running = False
+    
+    # Try to find PID from timestamp if we started with timestamp
+    if is_timestamp:
+        pid_file = os.path.join(logs_dir, f"pii_analysis_{pid_or_timestamp}.pid")
+        if os.path.exists(pid_file):
+            with open(pid_file) as f:
+                pid = f.read().strip()
+                # Check if process is still running
+                import subprocess
+                try:
+                    result = subprocess.run(["ps", "-p", pid], capture_output=True, text=True)
+                    process_running = result.returncode == 0
+                except Exception:
+                    process_running = False
+    # If we have a PID directly
+    else:
+        import subprocess
+        try:
+            result = subprocess.run(["ps", "-p", pid_or_timestamp], capture_output=True, text=True)
+            process_running = result.returncode == 0
+        except Exception:
+            process_running = False
+    
+    # Show log file contents with follow
+    import subprocess
+    
+    console.print(f"Following log file: [cyan]{log_file}[/cyan]")
+    if process_running:
+        console.print("[green]Process is still running[/green]")
+    else:
+        console.print("[yellow]Process is not running (showing completed log)[/yellow]")
+    
+    try:
+        # Use the tail command to follow log file
+        cmd = ["tail", "-f" if process_running else "-n", "1000" if not process_running else "", log_file]
+        cmd = [c for c in cmd if c]  # Remove empty strings
+        
+        console.print("\n[bold]--- Log output below ---[/bold]\n")
+        process = subprocess.Popen(cmd)
+        
+        # If process is running, handle keyboard interrupt to stop following
+        if process_running:
+            try:
+                process.wait()
+            except KeyboardInterrupt:
+                console.print("\n[bold]Stopped following log[/bold]")
+                process.terminate()
+        else:
+            # For completed logs, just wait for tail to finish
+            process.wait()
+            
+    except Exception as e:
+        console.print(f"[bold red]Error following log:[/bold red] {str(e)}")
+
+def list_detached_processes():
+    """
+    List all detached PII analysis processes
+    """
+    import subprocess
+    
+    # Path to logs directory
+    logs_dir = os.path.join(os.getcwd(), "logs")
+    
+    # Make sure logs directory exists
+    if not os.path.exists(logs_dir):
+        console.print("[yellow]No detached processes found (logs directory doesn't exist)[/yellow]")
+        return
+    
+    # Find all PID files
+    pid_files = glob.glob(os.path.join(logs_dir, "*.pid"))
+    if not pid_files:
+        console.print("[yellow]No detached processes found[/yellow]")
+        return
+    
+    # Create a table for display
+    from rich.table import Table
+    table = Table(title="Detached PII Analysis Processes", show_header=True, header_style="bold")
+    table.add_column("PID", style="cyan")
+    table.add_column("Timestamp", style="green")
+    table.add_column("Log File", style="blue")
+    table.add_column("Status", style="yellow")
+    table.add_column("Runtime", style="magenta")
+    
+    # Check each PID file
+    for pid_file in sorted(pid_files, reverse=True):
+        filename = os.path.basename(pid_file)
+        match = re.search(r'pii_analysis_(\d{8}-\d{6})\.pid', filename)
+        if match:
+            timestamp = match.group(1)
+            
+            # Read PID
+            with open(pid_file) as f:
+                pid = f.read().strip()
+            
+            # Check if process is running
+            try:
+                result = subprocess.run(["ps", "-p", pid], capture_output=True, text=True)
+                is_running = result.returncode == 0
+            except Exception:
+                is_running = False
+            
+            # Get log file
+            log_file = os.path.join(logs_dir, f"pii_analysis_{timestamp}.log")
+            log_file_short = os.path.basename(log_file) if os.path.exists(log_file) else "Log not found"
+            
+            # Calculate runtime
+            import datetime
+            try:
+                start_time = datetime.datetime.strptime(timestamp, "%Y%m%d-%H%M%S")
+                if is_running:
+                    runtime = str(datetime.datetime.now() - start_time).split('.')[0]  # Remove microseconds
+                else:
+                    # Try to get last modified time of log file
+                    if os.path.exists(log_file):
+                        end_time = datetime.datetime.fromtimestamp(os.path.getmtime(log_file))
+                        runtime = str(end_time - start_time).split('.')[0]  # Remove microseconds
+                    else:
+                        runtime = "Unknown"
+            except Exception:
+                runtime = "Unknown"
+            
+            # Add to table
+            table.add_row(
+                pid,
+                timestamp,
+                log_file_short,
+                "[green]Running[/green]" if is_running else "[red]Stopped[/red]",
+                runtime
+            )
+    
+    # Display table
+    console.print(table)
+    
+    # Show instructions
+    console.print("\nTo follow a process, use:")
+    console.print("[dim]  python src/process_files.py --follow <pid>[/dim]")
+    console.print("or")
+    console.print("[dim]  python src/process_files.py --follow <timestamp>[/dim]")
+
 def main():
     """Main entry point"""
     # Parse arguments
@@ -533,9 +752,19 @@ def main():
         export_to_json(args.db_path, args.export, args.job_id)
         return
     
+    # Handle --follow option
+    if args.follow:
+        follow_process(args.follow)
+        return
+    
+    # Handle --list-detached option
+    if args.list_detached:
+        list_detached_processes()
+        return
+    
     # Make sure directory is specified
     if not args.directory:
-        console.print("[bold red]Error:[/bold red] Directory must be specified unless using --status or --export")
+        console.print("[bold red]Error:[/bold red] Directory must be specified unless using --status, --export, --follow, or --list-detached")
         console.print("Run with --help for usage information")
         return
     
@@ -543,6 +772,62 @@ def main():
     if not os.path.isdir(args.directory):
         console.print(f"[bold red]Error:[/bold red] Directory not found: {args.directory}")
         return
+    
+    # Handle detached mode
+    if args.detach:
+        try:
+            # Check if the necessary tools are available
+            import subprocess
+            result = subprocess.run(["which", "nohup"], capture_output=True, text=True)
+            if result.returncode != 0:
+                console.print("[bold red]Error:[/bold red] 'nohup' command not found. Detached mode is not available.")
+                return
+            
+            # Prepare command to re-run script in detached mode
+            script_path = os.path.abspath(sys.argv[0])
+            current_dir = os.getcwd()
+            
+            # Build the command, excluding the --detach flag
+            cmd_args = [arg for arg in sys.argv[1:] if arg != "--detach" and arg != "-d"]
+            cmd = ["nohup", sys.executable, script_path] + cmd_args
+            
+            # Add output redirection
+            logs_dir = os.path.join(current_dir, "logs")
+            os.makedirs(logs_dir, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            log_file = os.path.join(logs_dir, f"pii_analysis_{timestamp}.log")
+            
+            # Create command string with output redirection
+            cmd_str = " ".join(cmd) + f" > {log_file} 2>&1 &"
+            
+            # Print info
+            console.print(f"[bold green]Starting process in detached mode[/bold green]")
+            console.print(f"Output will be logged to: [cyan]{log_file}[/cyan]")
+            console.print("To check status, use:")
+            console.print(f"[dim]  python {script_path} --db-path {args.db_path} --status[/dim]")
+            console.print("To follow output, use:")
+            console.print(f"[dim]  python {script_path} --follow {timestamp}[/dim]")
+            
+            # Execute the command
+            pid = subprocess.Popen(cmd_str, shell=True, start_new_session=True).pid
+            console.print(f"Process started with PID: {pid}")
+            
+            # Write PID to a file for reference
+            pid_file = os.path.join(logs_dir, f"pii_analysis_{timestamp}.pid")
+            with open(pid_file, 'w') as f:
+                f.write(str(pid))
+            console.print(f"PID file: [cyan]{pid_file}[/cyan]")
+            
+            # Write timestamp to a file for reference
+            timestamp_file = os.path.join(logs_dir, f"{pid}.timestamp")
+            with open(timestamp_file, 'w') as f:
+                f.write(timestamp)
+            
+            return
+            
+        except Exception as e:
+            console.print(f"[bold red]Error starting detached process:[/bold red] {str(e)}")
+            console.print("Continuing in normal mode...")
     
     # Process directory
     process_directory(args)

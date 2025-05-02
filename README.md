@@ -16,6 +16,8 @@ This project enhances the PII Analyzer with persistent storage and resumable pro
 - **Detailed Reporting**: Comprehensive statistics on processed files and found entities
 - **Export Capabilities**: Export results to JSON format for compatibility with other tools
 - **Command-Line Interface**: Robust CLI with many customization options
+- **Detached Mode**: Run processes in the background that survive SSH disconnections
+- **Process Management**: List and follow logs of detached processes
 
 ## Getting Started
 
@@ -68,6 +70,24 @@ Show job status:
 python src/process_files.py --db-path results.db --status
 ```
 
+Run in detached mode (continues even if you log off):
+
+```bash
+python src/process_files.py /path/to/documents --detach
+```
+
+List all detached processes:
+
+```bash
+python src/process_files.py --list-detached
+```
+
+Follow output of a detached process:
+
+```bash
+python src/process_files.py --follow <pid_or_timestamp>
+```
+
 For more options:
 
 ```bash
@@ -98,6 +118,7 @@ The system consists of several key components:
    - User-facing command-line tool
    - Job management and control
    - Status reporting and export functionality
+   - Detached process management
 
 ## Database Schema
 
@@ -135,6 +156,34 @@ Adjust the batch size for processing:
 python src/process_files.py /path/to/documents --batch-size 50
 ```
 
+### Detached Processing
+
+Running in detached mode is particularly useful for:
+- Long-running jobs that need to continue after SSH sessions end
+- Processing on remote servers where maintaining connections is impractical
+- Background processing of large document sets
+
+When using detached mode, the system:
+1. Creates a logs directory to store output
+2. Records the PID of the background process
+3. Provides utilities to monitor and follow the process
+
+Example workflow:
+
+```bash
+# Start a process in detached mode
+python src/process_files.py /path/to/documents --detach
+
+# List all running and completed detached processes
+python src/process_files.py --list-detached
+
+# View real-time output of a running process
+python src/process_files.py --follow <pid>
+
+# Check database status of the process
+python src/process_files.py --db-path results.db --status
+```
+
 ## Implementation Details
 
 The system is designed with the following principles:
@@ -144,6 +193,7 @@ The system is designed with the following principles:
 3. **Reliability**: Tolerates interruptions and system crashes
 4. **Thread-safety**: Uses thread-local storage for database connections
 5. **Atomicity**: Ensures database operations are atomic even with multiple workers
+6. **Persistence**: Processes can continue running independently of user sessions
 
 ## License
 
