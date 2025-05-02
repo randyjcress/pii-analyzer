@@ -6,7 +6,12 @@ breach notification requirements under North Carolina law (§75-61)
 """
 import json
 import sys
+import os
+import argparse
+import shutil
 from collections import defaultdict
+from pathlib import Path
+from datetime import datetime
 
 # Enhanced set of sensitive entity types based on both Presidio built-ins
 # and custom recognizers that would trigger NC breach notification
@@ -72,7 +77,17 @@ def breach_trigger(entity_set: set[str]) -> bool:
 
     return (has_name and has_sensitive) or credential_pair
 
-def analyze_pii_report(report_path):
+def analyze_pii_report(report_path, threshold=HIGH_CONFIDENCE_THRESHOLD):
+    """
+    Analyzes a PII report to identify files triggering breach notification.
+    
+    Args:
+        report_path: Path to the PII analysis report JSON file
+        threshold: Confidence threshold for entities (default: 0.7)
+        
+    Returns:
+        Dictionary of high-risk files with their entities
+    """
     with open(report_path, 'r') as f:
         data = json.load(f)
     
@@ -91,7 +106,7 @@ def analyze_pii_report(report_path):
             confidence = entity.get('score', 0.0)
             text = entity.get('text', '')
             
-            if confidence >= HIGH_CONFIDENCE_THRESHOLD:
+            if confidence >= threshold:
                 # Add to entity set for breach trigger evaluation
                 file_entity_sets[file_path].add(entity_type)
                 
@@ -111,28 +126,32 @@ def analyze_pii_report(report_path):
     
     return breach_files
 
-def report_high_risk_files(high_risk_files):
-    print(f"Files triggering NC §75-61 breach notification requirements:\n")
+def generate_report_text(high_risk_files):
+    """Generate a human-readable text report of high-risk files."""
+    output = []
+    output.append(f"NC §75-61 Breach Notification Analysis Report")
+    output.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    output.append(f"\nFiles triggering NC §75-61 breach notification requirements:\n")
     
     # Sort files by number of sensitive entities (highest first)
     sorted_files = sorted(high_risk_files.items(), key=lambda x: len(x[1]), reverse=True)
     
     for file_path, entities in sorted_files:
-        print(f"File: {file_path}")
-        print(f"Number of entities: {len(entities)}")
+        output.append(f"File: {file_path}")
+        output.append(f"Number of entities: {len(entities)}")
         
         # Count entity types
         entity_counts = defaultdict(int)
         for entity in entities:
             entity_counts[entity['category']] += 1
         
-        print("Entity types:")
+        output.append("Entity types:")
         for category, count in sorted(entity_counts.items(), key=lambda x: x[1], reverse=True):
-            print(f"  - {category}: {count}")
+            output.append(f"  - {category}: {count}")
         
         # Extract the set of entity types for this file to explain trigger
         entity_types = {entity['type'] for entity in entities}
-        print("Breach notification trigger reason:")
+        output.append("Breach notification trigger reason:")
         has_name = "PERSON" in entity_types or ("FIRST_NAME" in entity_types and "LAST_NAME" in entity_types)
         has_sensitive = bool(entity_types & SENSITIVE_TYPES)
         credential_pair = (
@@ -141,12 +160,12 @@ def report_high_risk_files(high_risk_files):
         )
         
         if has_name and has_sensitive:
-            print("  - Contains personally identifiable information AND sensitive data")
+            output.append("  - Contains personally identifiable information AND sensitive data")
         if credential_pair:
-            print("  - Contains credential pair (username/email + password/access code)")
+            output.append("  - Contains credential pair (username/email + password/access code)")
         
         # Show sample of entity text (max 3 per type)
-        print("Sample entities (max 3 per type):")
+        output.append("Sample entities (max 3 per type):")
         samples_by_type = defaultdict(list)
         
         for entity in entities:
@@ -155,13 +174,95 @@ def report_high_risk_files(high_risk_files):
                 samples_by_type[category].append(entity)
                 
         for category, samples in samples_by_type.items():
-            print(f"  {category}:")
+            output.append(f"  {category}:")
             for sample in samples:
                 # Mask part of the sensitive data for the report
                 masked_text = mask_sensitive_text(sample['text'], sample['type'])
-                print(f"    - {masked_text} (confidence: {sample['confidence']:.2f})")
+                output.append(f"    - {masked_text} (confidence: {sample['confidence']:.2f})")
         
-        print("-" * 80)
+        output.append("-" * 80)
+    
+    output.append(f"\nFound {len(high_risk_files)} files that would trigger breach notification")
+    output.append("requirements under North Carolina law (§75-61).")
+    
+    return "\n".join(output)
+
+def generate_report_json(high_risk_files):
+    """Generate a JSON representation of the breach report."""
+    report = {
+        "metadata": {
+            "report_type": "NC §75-61 Breach Notification Analysis",
+            "generated_at": datetime.now().isoformat(),
+            "file_count": len(high_risk_files)
+        },
+        "breach_files": {}
+    }
+    
+    for file_path, entities in high_risk_files.items():
+        # Group entities by type
+        entity_types = {entity['type'] for entity in entities}
+        entity_by_type = defaultdict(list)
+        
+        for entity in entities:
+            entity_by_type[entity['type']].append({
+                "text": mask_sensitive_text(entity['text'], entity['type']),
+                "confidence": entity['score'] if 'score' in entity else entity['confidence'],
+                "category": entity['category']
+            })
+        
+        # Determine breach trigger reason
+        has_name = "PERSON" in entity_types or ("FIRST_NAME" in entity_types and "LAST_NAME" in entity_types)
+        has_sensitive = bool(entity_types & SENSITIVE_TYPES)
+        credential_pair = (
+            ("EMAIL_ADDRESS" in entity_types or "USERNAME" in entity_types)
+            and ("PASSWORD" in entity_types or "ACCESS_CODE" in entity_types)
+        )
+        
+        breach_reasons = []
+        if has_name and has_sensitive:
+            breach_reasons.append("personal_info_with_sensitive_data")
+        if credential_pair:
+            breach_reasons.append("credential_pair")
+        
+        # Add to the report
+        report["breach_files"][file_path] = {
+            "entity_count": len(entities),
+            "entity_types": list(entity_types),
+            "breach_reasons": breach_reasons,
+            "entities_by_type": dict(entity_by_type)
+        }
+    
+    return json.dumps(report, indent=2)
+
+def clone_high_risk_files(high_risk_files, clone_dir):
+    """Clone the high-risk files to a specified directory maintaining structure."""
+    if not os.path.exists(clone_dir):
+        os.makedirs(clone_dir)
+    
+    copied_files = []
+    
+    for file_path in high_risk_files.keys():
+        # Check if file exists
+        if not os.path.exists(file_path):
+            print(f"Warning: Could not find {file_path}")
+            continue
+            
+        # Create the destination directory structure
+        rel_path = os.path.relpath(file_path, '/')
+        dest_path = os.path.join(clone_dir, rel_path)
+        dest_dir = os.path.dirname(dest_path)
+        
+        if not os.path.exists(dest_dir):
+            os.makedirs(dest_dir)
+        
+        # Copy the file
+        try:
+            shutil.copy2(file_path, dest_path)
+            copied_files.append(dest_path)
+        except Exception as e:
+            print(f"Error copying {file_path}: {e}")
+    
+    return copied_files
 
 def mask_sensitive_text(text, entity_type):
     """Masks sensitive text for display in reports"""
@@ -194,30 +295,90 @@ def mask_sensitive_text(text, entity_type):
             return f"{text[0]}***{text[-1]}"
         return "****"
 
-def print_usage():
-    """Print usage information for the script"""
-    print(f"Usage: {sys.argv[0]} <pii_analysis_report.json>")
-    print()
-    print("Analyzes a PII analysis report to identify files that would trigger")
-    print("breach notification requirements under North Carolina law (§75-61).")
-    print()
-    print("The script looks for:")
-    print("1. Personal identifiers (name) combined with sensitive information, or")
-    print("2. Credential pairs (username/email + password/access code)")
-    print()
-    print("Entities are only considered if they meet the confidence threshold (0.7).")
+def parse_arguments():
+    """Parse and validate command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="NC §75-61 Breach Notification Analysis",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    parser.add_argument(
+        "report_file",
+        help="Path to the PII analysis report JSON file"
+    )
+    
+    parser.add_argument(
+        "-o", "--output",
+        help="Output file path for the breach report (default: stdout)"
+    )
+    
+    parser.add_argument(
+        "-f", "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (text or json)"
+    )
+    
+    parser.add_argument(
+        "-t", "--threshold",
+        type=float,
+        default=HIGH_CONFIDENCE_THRESHOLD,
+        help="Confidence threshold for entities (0.0-1.0)"
+    )
+    
+    parser.add_argument(
+        "-c", "--clone-dir",
+        help="Directory to create cloned structure of high-risk files"
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate that the report file exists
+    if not os.path.exists(args.report_file):
+        parser.error(f"Report file not found: {args.report_file}")
+    
+    # Validate threshold is in range
+    if args.threshold < 0.0 or args.threshold > 1.0:
+        parser.error(f"Threshold must be between 0.0 and 1.0")
+        
+    return args
+
+def main():
+    """Main entry point for the script."""
+    args = parse_arguments()
+    
+    # Analyze the report
+    high_risk_files = analyze_pii_report(args.report_file, args.threshold)
+    
+    # Generate the report
+    if args.format == "text":
+        report = generate_report_text(high_risk_files)
+    else:  # json
+        report = generate_report_json(high_risk_files)
+    
+    # Output the report
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(report)
+        print(f"Report written to {args.output}")
+    else:
+        print(report)
+    
+    # Clone files if requested
+    if args.clone_dir and high_risk_files:
+        copied_files = clone_high_risk_files(high_risk_files, args.clone_dir)
+        if copied_files:
+            print(f"\nCloned {len(copied_files)} high-risk files to {args.clone_dir}")
+        else:
+            print(f"\nNo files were copied to {args.clone_dir}")
+    
+    # Return summary for non-interactive usage
+    return {
+        "files_analyzed": len(high_risk_files),
+        "report_format": args.format,
+        "output_file": args.output,
+        "clone_directory": args.clone_dir if args.clone_dir else None
+    }
 
 if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        print_usage()
-        sys.exit(1)
-        
-    report_path = sys.argv[1]
-    high_risk_files = analyze_pii_report(report_path)
-    
-    if high_risk_files:
-        report_high_risk_files(high_risk_files)
-        print(f"Found {len(high_risk_files)} files that would trigger breach notification")
-        print("requirements under North Carolina law (§75-61).")
-    else:
-        print("No files found that would trigger breach notification requirements.") 
+    main() 
