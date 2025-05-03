@@ -156,26 +156,31 @@ def get_processing_time_stats(db_path: str, job_id: Optional[int] = None) -> Dic
             'estimated_completion_hours': 0
         }
     
-    # Parse datetime objects from strings
-    try:
-        # For SQLite datetime format
-        start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-        if last_update_str:
-            last_update = datetime.fromisoformat(last_update_str.replace('Z', '+00:00'))
-        else:
-            last_update = datetime.now()
-    except ValueError:
-        # Try parsing with different format
+    # Handle case where database returns datetime objects directly
+    if isinstance(start_time_str, datetime):
+        start_time = start_time_str
+        last_update = last_update_str if isinstance(last_update_str, datetime) else datetime.now()
+    else:
+        # Parse datetime objects from strings
         try:
-            start_time = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M:%S.%f")
+            # For SQLite datetime format
+            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
             if last_update_str:
-                last_update = datetime.strptime(last_update_str, "%Y-%m-%d %H:%M:%S.%f")
+                last_update = datetime.fromisoformat(last_update_str.replace('Z', '+00:00'))
             else:
                 last_update = datetime.now()
         except ValueError:
-            # Default to now if can't parse
-            start_time = datetime.now() - timedelta(hours=1)  # Assume at least an hour
-            last_update = datetime.now()
+            # Try parsing with different format
+            try:
+                start_time = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M:%S.%f")
+                if last_update_str:
+                    last_update = datetime.strptime(last_update_str, "%Y-%m-%d %H:%M:%S.%f")
+                else:
+                    last_update = datetime.now()
+            except ValueError:
+                # Default to now if can't parse
+                start_time = datetime.now() - timedelta(hours=1)  # Assume at least an hour
+                last_update = datetime.now()
     
     # Calculate elapsed time in seconds
     elapsed_seconds = (last_update - start_time).total_seconds()
