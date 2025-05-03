@@ -14,6 +14,71 @@ from collections import defaultdict
 
 from .db_utils import get_database
 
+def get_file_processing_stats(db_path: str, job_id: Optional[int] = None) -> Dict[str, int]:
+    """
+    Get statistics about file processing status for a job.
+    
+    Args:
+        db_path: Path to the database file
+        job_id: Specific job ID to analyze (most recent if None)
+        
+    Returns:
+        Dictionary with counts of files in different states
+    """
+    # Connect to database
+    db = get_database(db_path)
+    
+    # Get job ID if not provided
+    if job_id is None:
+        jobs = db.get_all_jobs()
+        if not jobs:
+            return {
+                'total_registered': 0,
+                'pending': 0,
+                'processing': 0,
+                'completed': 0,
+                'error': 0
+            }
+        job_id = jobs[0]['job_id']  # Get most recent job
+    
+    # Get job information
+    job = db.get_job(job_id)
+    if not job:
+        return {
+            'total_registered': 0,
+            'pending': 0,
+            'processing': 0,
+            'completed': 0,
+            'error': 0
+        }
+    
+    # Query for file status counts
+    cursor = db.conn.cursor()
+    cursor.execute("""
+    SELECT status, COUNT(*) as count FROM files
+    WHERE job_id = ?
+    GROUP BY status
+    """, (job_id,))
+    
+    status_counts = {row['status']: row['count'] for row in cursor.fetchall()}
+    
+    # Calculate total files registered
+    total_registered = job.get('total_files', 0)
+    
+    # Get counts by status
+    pending_count = status_counts.get('pending', 0)
+    processing_count = status_counts.get('processing', 0)
+    completed_count = status_counts.get('completed', 0)
+    error_count = status_counts.get('error', 0)
+    
+    return {
+        'total_registered': total_registered,
+        'pending': pending_count,
+        'processing': processing_count,
+        'completed': completed_count,
+        'error': error_count
+    }
+
 def load_pii_data_from_db(db_path: str, job_id: Optional[int] = None, threshold: float = 0.7) -> Dict[str, Any]:
     """
     Load PII analysis data directly from the database.
@@ -44,9 +109,12 @@ def load_pii_data_from_db(db_path: str, job_id: Optional[int] = None, threshold:
     # Get job information
     job = db.get_job(job_id)
     
+    # Get file processing status statistics
+    processing_stats = get_file_processing_stats(db_path, job_id)
+    
     # Get all completed files for this job
     files = db.get_completed_files(job_id)
-    total_files = len(files)
+    total_completed = len(files)
     
     # Structure to hold results
     results = []
@@ -97,9 +165,13 @@ def load_pii_data_from_db(db_path: str, job_id: Optional[int] = None, threshold:
         'job_name': job.get('name', ''),
         'start_time': job.get('start_time', ''),
         'end_time': job.get('last_updated', ''),
-        'total_files': total_files,
-        'processed_files': job.get('processed_files', 0),
-        'error_files': job.get('error_files', 0),
+        'total_registered': processing_stats['total_registered'],
+        'total_completed': total_completed,
+        'pending_files': processing_stats['pending'],
+        'processing_files': processing_stats['processing'],
+        'error_files': processing_stats['error'],
+        'total_files': total_completed,  # For backward compatibility
+        'processed_files': job.get('processed_files', 0),  # For backward compatibility
         'results': results
     }
     

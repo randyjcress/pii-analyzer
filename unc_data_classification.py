@@ -249,12 +249,17 @@ def generate_executive_summary(classified_files: Dict[str, Dict], original_repor
     # Extract file type statistics if available
     file_type_stats = {}
     total_files = 0
+    file_processing_stats = None
     
-    # Try to extract file type information from the database if provided
+    # Try to extract file type information and processing stats from the database if provided
     if db_path:
         try:
             file_type_stats = get_file_type_statistics(db_path, job_id)
             total_files = sum(file_type_stats.values())
+            
+            # Get file processing statistics
+            from src.database.db_reporting import get_file_processing_stats
+            file_processing_stats = get_file_processing_stats(db_path, job_id)
         except Exception as e:
             print(f"Warning: Could not extract file statistics from database: {e}")
     
@@ -278,7 +283,24 @@ def generate_executive_summary(classified_files: Dict[str, Dict], original_repor
     # If we have file type statistics, include them in the report
     if file_type_stats:
         output.append("")
-        output.append(f"Total Files Analyzed: {total_files}")
+        
+        # Add detailed processing information if available
+        if file_processing_stats:
+            registered = file_processing_stats.get('total_registered', 0)
+            completed = file_processing_stats.get('completed', 0)
+            pending = file_processing_stats.get('pending', 0)
+            processing = file_processing_stats.get('processing', 0)
+            error = file_processing_stats.get('error', 0)
+            
+            output.append(f"Files Registered in Database: {registered}")
+            output.append(f"Analysis Progress:")
+            output.append(f"  Completed: {completed} files ({(completed/registered*100):.1f}% of registered)")
+            output.append(f"  Pending: {pending} files")
+            output.append(f"  In Progress: {processing} files")
+            output.append(f"  Error: {error} files")
+        else:
+            output.append(f"Total Files Analyzed: {total_files}")
+            
         output.append("File Types:")
         for ext, count in sorted(file_type_stats.items(), key=lambda x: x[1], reverse=True):
             output.append(f"  {ext}: {count} files")
