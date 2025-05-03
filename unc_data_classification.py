@@ -10,6 +10,7 @@ import sys
 import os
 import argparse
 import shutil
+import logging
 from enum import IntEnum
 from collections import defaultdict
 from pathlib import Path
@@ -643,12 +644,18 @@ Examples:
                         help="Minimum tier to include in report (0=Public, 1=Internal, 2=Confidential, 3=Restricted)")
     parser.add_argument("--copy-files", "-c", type=str,
                        help="Copy classified files to specified directory (organized by tier)")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress INFO level log messages")
     
     return parser.parse_args()
 
 def main() -> Dict[str, Any]:
     """Main function."""
     args = parse_arguments()
+    
+    # Configure logging level based on quiet flag
+    if args.quiet:
+        logging.getLogger().setLevel(logging.WARNING)
+        logging.getLogger('pii_database').setLevel(logging.WARNING)
     
     try:
         # Analyze PII data based on input type
