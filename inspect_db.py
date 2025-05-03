@@ -17,8 +17,8 @@ def inspect_database(db_path, show_processing_speed=False, time_window=30):
         print(f"Error: Database file {db_path} not found")
         return
         
-    # Connect to the database
-    conn = sqlite3.connect(db_path)
+    # Connect to the database with datetime detection
+    conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
     conn.row_factory = sqlite3.Row
 
     # Get jobs
@@ -111,7 +111,7 @@ def inspect_database(db_path, show_processing_speed=False, time_window=30):
                    r.processing_time, r.entity_count
             FROM files f
             LEFT JOIN results r ON f.file_id = r.file_id
-            WHERE f.job_id = ? AND f.status = 'completed' AND f.process_end IS NOT NULL
+            WHERE f.job_id = ? AND f.status = 'completed'
             ORDER BY f.process_end DESC
             """, (job_id,))
             
@@ -137,6 +137,10 @@ def inspect_database(db_path, show_processing_speed=False, time_window=30):
             recent_files = []
             recent_processing_times = []
             
+            # Count of files with valid timestamps
+            valid_timestamp_count = 0
+            timestamp_format_issues = 0
+            
             for file in completed_files:
                 # Extract processing time
                 proc_time = file['processing_time'] if file['processing_time'] else 0
@@ -156,16 +160,40 @@ def inspect_database(db_path, show_processing_speed=False, time_window=30):
                 file_types[file_ext] += 1
                 
                 # Process time-based statistics
-                if file['process_end'] and isinstance(file['process_end'], datetime):
+                process_end = file['process_end']
+                
+                # Try to handle different timestamp formats
+                end_time = None
+                if process_end:
+                    if isinstance(process_end, datetime):
+                        end_time = process_end
+                    elif isinstance(process_end, str):
+                        # Try to parse string timestamps
+                        try:
+                            # Try ISO format
+                            end_time = datetime.fromisoformat(process_end)
+                        except ValueError:
+                            try:
+                                # Try common SQLite format
+                                end_time = datetime.strptime(process_end, '%Y-%m-%d %H:%M:%S.%f')
+                            except ValueError:
+                                try:
+                                    # Try without microseconds
+                                    end_time = datetime.strptime(process_end, '%Y-%m-%d %H:%M:%S')
+                                except ValueError:
+                                    timestamp_format_issues += 1
+                
+                if end_time:
+                    valid_timestamp_count += 1
                     # Add to minute & hour counters
-                    minute_key = file['process_end'].strftime("%Y-%m-%d %H:%M")
-                    hour_key = file['process_end'].strftime("%Y-%m-%d %H")
+                    minute_key = end_time.strftime("%Y-%m-%d %H:%M")
+                    hour_key = end_time.strftime("%Y-%m-%d %H")
                     
                     files_by_minute[minute_key] += 1
                     files_by_hour[hour_key] += 1
                     
                     # Check if within time window
-                    if file['process_end'] >= window_start:
+                    if end_time >= window_start:
                         recent_files.append(file)
                         recent_processing_times.append(proc_time)
             
@@ -189,6 +217,11 @@ def inspect_database(db_path, show_processing_speed=False, time_window=30):
                     max_entities = max(entity_counts)
                     print(f"    Average entities per file: {avg_entities:.2f}")
                     print(f"    Maximum entities in a file: {max_entities}")
+                
+                # Print timestamp validation info
+                print(f"    Files with valid timestamps: {valid_timestamp_count}/{len(completed_files)}")
+                if timestamp_format_issues > 0:
+                    print(f"    Files with timestamp format issues: {timestamp_format_issues}")
             
             # Recent processing statistics
             if recent_files:
@@ -210,6 +243,17 @@ def inspect_database(db_path, show_processing_speed=False, time_window=30):
                     print(f"    {hour}: {count} files ({count/1.0:.2f} files/hour)")
             else:
                 print("    No hourly data available")
+                
+                # Let's manually check some process_end values to debug
+                cursor.execute("""
+                SELECT process_end FROM files 
+                WHERE job_id = ? AND status = 'completed'
+                LIMIT 5
+                """, (job_id,))
+                sample_timestamps = [row['process_end'] for row in cursor.fetchall()]
+                print("\n  Sample process_end values for debugging:")
+                for i, ts in enumerate(sample_timestamps):
+                    print(f"    Sample {i+1}: {ts} (type: {type(ts).__name__})")
     
     conn.close()
 
