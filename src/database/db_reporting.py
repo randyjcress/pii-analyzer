@@ -9,6 +9,8 @@ classification and reporting scripts.
 
 import os
 import json
+import math
+from datetime import datetime, timedelta
 from typing import Dict, List, Set, Optional, Any, Tuple
 from collections import defaultdict
 
@@ -79,6 +81,126 @@ def get_file_processing_stats(db_path: str, job_id: Optional[int] = None) -> Dic
         'error': error_count
     }
 
+def get_processing_time_stats(db_path: str, job_id: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Calculate processing time statistics and estimated completion time.
+    
+    Args:
+        db_path: Path to the database file
+        job_id: Specific job ID to analyze (most recent if None)
+        
+    Returns:
+        Dictionary with processing time statistics and estimates
+    """
+    # Connect to database
+    db = get_database(db_path)
+    
+    # Get job ID if not provided
+    if job_id is None:
+        jobs = db.get_all_jobs()
+        if not jobs:
+            return {
+                'elapsed_time_seconds': 0,
+                'elapsed_time_formatted': "0:00:00",
+                'files_per_hour': 0,
+                'estimated_completion_time': "Unknown",
+                'estimated_completion_hours': 0
+            }
+        job_id = jobs[0]['job_id']  # Get most recent job
+    
+    # Get job information
+    job = db.get_job(job_id)
+    if not job:
+        return {
+            'elapsed_time_seconds': 0,
+            'elapsed_time_formatted': "0:00:00",
+            'files_per_hour': 0,
+            'estimated_completion_time': "Unknown",
+            'estimated_completion_hours': 0
+        }
+        
+    # Get processing stats
+    processing_stats = get_file_processing_stats(db_path, job_id)
+    completed_files = processing_stats['completed']
+    pending_files = processing_stats['pending']
+    
+    # Calculate elapsed time
+    start_time_str = job.get('start_time')
+    last_update_str = job.get('last_updated')
+    
+    if not start_time_str:
+        return {
+            'elapsed_time_seconds': 0,
+            'elapsed_time_formatted': "0:00:00",
+            'files_per_hour': 0,
+            'estimated_completion_time': "Unknown",
+            'estimated_completion_hours': 0
+        }
+    
+    # Parse datetime objects from strings
+    try:
+        # For SQLite datetime format
+        start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+        if last_update_str:
+            last_update = datetime.fromisoformat(last_update_str.replace('Z', '+00:00'))
+        else:
+            last_update = datetime.now()
+    except ValueError:
+        # Try parsing with different format
+        try:
+            start_time = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M:%S.%f")
+            if last_update_str:
+                last_update = datetime.strptime(last_update_str, "%Y-%m-%d %H:%M:%S.%f")
+            else:
+                last_update = datetime.now()
+        except ValueError:
+            # Default to now if can't parse
+            start_time = datetime.now() - timedelta(hours=1)  # Assume at least an hour
+            last_update = datetime.now()
+    
+    # Calculate elapsed time in seconds
+    elapsed_seconds = (last_update - start_time).total_seconds()
+    
+    # Format elapsed time as HH:MM:SS
+    elapsed_hours = int(elapsed_seconds // 3600)
+    elapsed_minutes = int((elapsed_seconds % 3600) // 60)
+    elapsed_secs = int(elapsed_seconds % 60)
+    elapsed_formatted = f"{elapsed_hours}:{elapsed_minutes:02d}:{elapsed_secs:02d}"
+    
+    # Calculate processing rate (files per hour)
+    files_per_hour = 0
+    if elapsed_seconds > 0 and completed_files > 0:
+        files_per_second = completed_files / elapsed_seconds
+        files_per_hour = files_per_second * 3600
+    
+    # Estimate completion time
+    estimated_completion_hours = 0
+    estimated_completion = "Unknown"
+    
+    if files_per_hour > 0 and pending_files > 0:
+        estimated_hours = pending_files / files_per_hour
+        estimated_completion_hours = estimated_hours
+        
+        # Format as readable time
+        if estimated_hours < 1:
+            estimated_completion = f"{int(estimated_hours * 60)} minutes"
+        elif estimated_hours < 24:
+            hours = int(estimated_hours)
+            minutes = int((estimated_hours - hours) * 60)
+            estimated_completion = f"{hours} hour{'s' if hours != 1 else ''}" + (f", {minutes} minute{'s' if minutes != 1 else ''}" if minutes > 0 else "")
+        else:
+            days = int(estimated_hours / 24)
+            hours = int(estimated_hours % 24)
+            estimated_completion = f"{days} day{'s' if days != 1 else ''}" + (f", {hours} hour{'s' if hours != 1 else ''}" if hours > 0 else "")
+    
+    return {
+        'elapsed_time_seconds': elapsed_seconds,
+        'elapsed_time_formatted': elapsed_formatted,
+        'files_per_hour': round(files_per_hour, 1),
+        'estimated_completion_time': estimated_completion,
+        'estimated_completion_hours': estimated_completion_hours
+    }
+
 def load_pii_data_from_db(db_path: str, job_id: Optional[int] = None, threshold: float = 0.7) -> Dict[str, Any]:
     """
     Load PII analysis data directly from the database.
@@ -115,6 +237,9 @@ def load_pii_data_from_db(db_path: str, job_id: Optional[int] = None, threshold:
     # Get all completed files for this job
     files = db.get_completed_files(job_id)
     total_completed = len(files)
+    
+    # Get processing time statistics
+    time_stats = get_processing_time_stats(db_path, job_id)
     
     # Structure to hold results
     results = []
@@ -170,6 +295,9 @@ def load_pii_data_from_db(db_path: str, job_id: Optional[int] = None, threshold:
         'pending_files': processing_stats['pending'],
         'processing_files': processing_stats['processing'],
         'error_files': processing_stats['error'],
+        'elapsed_time': time_stats['elapsed_time_formatted'],
+        'files_per_hour': time_stats['files_per_hour'],
+        'estimated_completion': time_stats['estimated_completion_time'],
         'total_files': total_completed,  # For backward compatibility
         'processed_files': job.get('processed_files', 0),  # For backward compatibility
         'results': results
