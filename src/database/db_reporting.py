@@ -121,8 +121,8 @@ def get_processing_time_stats(db_path: str, job_id: Optional[int] = None) -> Dic
         
     # Get processing stats
     processing_stats = get_file_processing_stats(db_path, job_id)
-    completed_files = processing_stats['completed']
-    pending_files = processing_stats['pending']
+    completed_files = int(processing_stats['completed'])
+    pending_files = int(processing_stats['pending'])
     
     # Calculate elapsed time
     start_time_str = job.get('start_time')
@@ -170,7 +170,7 @@ def get_processing_time_stats(db_path: str, job_id: Optional[int] = None) -> Dic
     # Calculate processing rate (files per hour)
     files_per_hour = 0
     if elapsed_seconds > 0 and completed_files > 0:
-        files_per_second = completed_files / elapsed_seconds
+        files_per_second = float(completed_files) / float(elapsed_seconds)
         files_per_hour = files_per_second * 3600
     
     # Estimate completion time
@@ -178,7 +178,7 @@ def get_processing_time_stats(db_path: str, job_id: Optional[int] = None) -> Dic
     estimated_completion = "Unknown"
     
     if files_per_hour > 0 and pending_files > 0:
-        estimated_hours = pending_files / files_per_hour
+        estimated_hours = float(pending_files) / float(files_per_hour)
         estimated_completion_hours = estimated_hours
         
         # Format as readable time

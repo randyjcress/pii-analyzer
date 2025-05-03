@@ -286,15 +286,15 @@ def generate_executive_summary(high_risk_files, original_report_path=None, db_pa
         
         # Add detailed processing information if available
         if file_processing_stats:
-            registered = file_processing_stats.get('total_registered', 0)
-            completed = file_processing_stats.get('completed', 0)
-            pending = file_processing_stats.get('pending', 0)
-            processing = file_processing_stats.get('processing', 0)
-            error = file_processing_stats.get('error', 0)
+            registered = int(file_processing_stats.get('total_registered', 0))
+            completed = int(file_processing_stats.get('completed', 0))
+            pending = int(file_processing_stats.get('pending', 0))
+            processing = int(file_processing_stats.get('processing', 0))
+            error = int(file_processing_stats.get('error', 0))
             
             output.append(f"Files Registered in Database: {registered}")
             output.append(f"Analysis Progress:")
-            output.append(f"  Completed: {completed} files ({(completed/registered*100):.1f}% of registered)")
+            output.append(f"  Completed: {completed} files ({(completed/float(registered)*100):.1f}% of registered)")
             output.append(f"  Pending: {pending} files")
             output.append(f"  In Progress: {processing} files")
             output.append(f"  Error: {error} files")
@@ -302,7 +302,7 @@ def generate_executive_summary(high_risk_files, original_report_path=None, db_pa
             # Add processing time and completion estimates if available
             if time_stats:
                 elapsed_time = time_stats.get('elapsed_time_formatted', '0:00:00')
-                files_per_hour = time_stats.get('files_per_hour', 0)
+                files_per_hour = float(time_stats.get('files_per_hour', 0))
                 estimated_completion = time_stats.get('estimated_completion_time', 'Unknown')
                 
                 output.append(f"Processing Time Statistics:")
