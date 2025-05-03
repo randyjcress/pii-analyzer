@@ -494,7 +494,8 @@ def process_directory(args):
                 db,
                 job_id,
                 supported_extensions=extensions,
-                progress_callback=scan_progress_callback
+                progress_callback=scan_progress_callback,
+                verbose=args.verbose
             )
         
         logger.info(f"Rescanned directory: found {total} files, registered {new} new files")
@@ -602,107 +603,64 @@ def process_directory(args):
                         db,
                         job_id,
                         supported_extensions=extensions,
-                        skip_registration=True,
-                        progress_callback=scan_progress_callback
+                        skip_registration=True,  # Skip registration since files are already in DB
+                        progress_callback=scan_progress_callback,
+                        verbose=args.verbose
                     )
-                    
-                    logger.info(f"Scanned directory after DB reset: found {total} files (skipped registration)")
                 else:
                     logger.error(f"Job {job_id} does not have directory metadata")
+                    logger.error("Please specify a directory with --directory")
                     return
         elif args.directory:
-            # Check if job can be resumed
-            info = find_resumption_point(db, job_id)
-            
-            if info['status'] == 'resumable':
-                logger.info(f"Resuming job {job_id}: {info['message']}")
+            # For normal resume with directory, rescan to find any new files
+            # Setup progress display for scanning
+            with Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(pulse_style="cyan"),
+                TimeElapsedColumn(),
+                console=console
+            ) as scan_progress:
+                # Create indeterminate progress task for scanning
+                scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
                 
-                # Reset any stalled files
-                reset_count = reset_stalled_files(db, job_id)
-                if reset_count > 0:
-                    logger.info(f"Reset {reset_count} stalled files to pending status")
-            else:
-                # Job cannot be resumed, ask if user wants to create a new job
-                if console.input(f"Job {job_id} cannot be resumed ({info['message']}). Create a new job? (y/n) ").lower() != 'y':
-                    logger.info("User chose not to create a new job")
-                    return
-                
-                # Create new job
-                job_id = db.create_job(
-                    name=f"PII Analysis - {os.path.basename(args.directory)}",
-                    metadata={'directory': args.directory}
+                # Rescan to find any new files since last run
+                total, new = scan_directory(
+                    args.directory,
+                    db,
+                    job_id,
+                    supported_extensions=extensions,
+                    progress_callback=scan_progress_callback,
+                    verbose=args.verbose
                 )
-                logger.info(f"Created new job {job_id} (previous job cannot be resumed: {info['message']})")
-                
-                # Setup progress display for scanning
-                with Progress(
-                    TextColumn("[progress.description]{task.description}"),
-                    BarColumn(pulse_style="cyan"),
-                    TimeElapsedColumn(),
-                    console=console
-                ) as scan_progress:
-                    # Create indeterminate progress task for scanning
-                    scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
-                    
-                    # Scan directory
-                    total, new = scan_directory(
-                        args.directory,
-                        db,
-                        job_id,
-                        supported_extensions=extensions,
-                        progress_callback=scan_progress_callback
-                    )
-                
-                logger.info(f"Scanned directory: found {total} files, registered {new} new files")
+            
+            logger.info(f"Scanned directory: found {total} files, registered {new} new files")
+        
+        # Find resumption point for this job
+        resumption = find_resumption_point(db, job_id)
+        
+        if resumption['status'] == 'completed':
+            console.print(f"[bold green]Job {job_id} is already completed.[/bold green]")
+            console.print(f"Processed {resumption['completed_files']} files, {resumption['error_files']} errors")
+            show_status(args.db_path, job_id)
+            return
+        elif resumption['status'] == 'resumable':
+            logger.info(f"Resuming job {job_id}: {resumption['message']}")
+            # Reset any stalled files to pending (from crash/interrupt)
+            reset_count = reset_stalled_files(db, job_id)
+            if reset_count > 0:
+                logger.info(f"Reset {reset_count} stalled files to 'pending' status")
         else:
-            # No directory provided but we have a job ID
-            job = db.get_job(job_id)
-            
-            # Try to extract directory from metadata
-            directory = None
-            if job and 'metadata' in job:
-                directory = job['metadata'].get('directory')
-            
-            # If still no directory, try to extract from job name
-            if not directory and job and job.get('name', '').startswith('PII Analysis - '):
-                dir_name = job['name'][len('PII Analysis - '):]
-                if dir_name and os.path.isdir(dir_name):
-                    directory = dir_name
-                    # Add this to metadata for future use
-                    db.conn.execute(
-                        "INSERT OR REPLACE INTO job_metadata (job_id, key, value) VALUES (?, 'directory', ?)",
-                        (job_id, directory)
-                    )
-                    db.conn.commit()
-            
-            if directory:
-                logger.info(f"Using directory from job metadata: {directory}")
-                args.directory = directory
-                
-                # Check if job can be resumed
-                info = find_resumption_point(db, job_id)
-                
-                if info['status'] == 'resumable':
-                    logger.info(f"Resuming job {job_id}: {info['message']}")
-                    
-                    # Reset any stalled files
-                    reset_count = reset_stalled_files(db, job_id)
-                    if reset_count > 0:
-                        logger.info(f"Reset {reset_count} stalled files to pending status")
-                else:
-                    logger.error(f"Job {job_id} cannot be resumed: {info['message']}")
-                    return
-            else:
-                logger.error(f"No directory provided and job {job_id} doesn't have directory metadata")
-                logger.error("Please specify a directory with --directory")
-                return
+            console.print(f"[bold yellow]Job {job_id} cannot be resumed: {resumption['message']}[/bold yellow]")
+            return
+    
+    # Create a new job if not resuming or force-restarting
     else:
-        # Create new job
-        if args.directory is None:
-            logger.error("Directory is required for new job")
+        if not args.directory:
+            logger.error("Directory argument is required for scanning")
             return
             
         job_id = db.create_job(
+            command_line=' '.join(sys.argv),
             name=f"PII Analysis - {os.path.basename(args.directory)}",
             metadata={'directory': args.directory}
         )
@@ -724,7 +682,9 @@ def process_directory(args):
                 db,
                 job_id,
                 supported_extensions=extensions,
-                progress_callback=scan_progress_callback
+                max_files=args.max_files,
+                progress_callback=scan_progress_callback,
+                verbose=args.verbose
             )
         
         logger.info(f"Scanned directory: found {total} files, registered {new} new files")

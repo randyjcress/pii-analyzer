@@ -74,7 +74,8 @@ def scan_directory(
     supported_extensions: Optional[Set[str]] = None,
     max_files: Optional[int] = None,
     skip_registration: bool = False,
-    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    verbose: bool = False
 ) -> Tuple[int, int]:
     """
     Scan directory for files and register them in the database.
@@ -87,6 +88,7 @@ def scan_directory(
         max_files: Maximum number of files to register
         skip_registration: If True, only count files but don't try to register them
         progress_callback: Optional callback for progress updates
+        verbose: Whether to log verbose progress messages
         
     Returns:
         Tuple of (total files found, newly registered files)
@@ -148,8 +150,8 @@ def scan_directory(
                     if db.register_file(job_id, file_path, file_size, file_type, modified_time):
                         new_files += 1
                         
-                        # Log progress every 1000 files
-                        if new_files % 1000 == 0:
+                        # Log progress every 1000 files only if verbose mode is enabled
+                        if verbose and new_files % 1000 == 0:
                             elapsed = time.time() - start_time
                             logger.info(f"Registered {new_files} files so far (total found: {total_files}, elapsed: {elapsed:.2f}s)")
                 except OSError as e:
