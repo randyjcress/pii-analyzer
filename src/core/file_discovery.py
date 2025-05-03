@@ -40,13 +40,13 @@ def get_file_type(file_path: str) -> str:
     _, ext = os.path.splitext(file_path)
     return ext.lower()
 
-def is_supported_file(file_path: str, supported_extensions: Set[str]) -> bool:
+def is_supported_file(file_path: str, extensions: Set[str]) -> bool:
     """
     Check if a file is supported based on its extension.
     
     Args:
         file_path: Path to the file
-        supported_extensions: Set of supported file extensions
+        extensions: Set of supported file extensions
         
     Returns:
         True if file type is supported, False otherwise
@@ -54,127 +54,137 @@ def is_supported_file(file_path: str, supported_extensions: Set[str]) -> bool:
     file_type = get_file_type(file_path)
     
     # Handle extensions with or without dots
-    if file_type in supported_extensions:
+    if file_type in extensions:
         return True
     
     # Try without the dot if extension has a dot
-    if file_type.startswith('.') and file_type[1:] in supported_extensions:
+    if file_type.startswith('.') and file_type[1:] in extensions:
         return True
     
-    # Try with a dot if supported_extensions have dots but file_type doesn't
-    if not file_type.startswith('.') and f'.{file_type}' in supported_extensions:
+    # Try with a dot if extensions have dots but file_type doesn't
+    if not file_type.startswith('.') and f'.{file_type}' in extensions:
         return True
         
     return False
 
 def scan_directory(
-    directory_path: str, 
     db: PIIDatabase, 
     job_id: int,
-    supported_extensions: Optional[Set[str]] = None,
-    max_files: Optional[int] = None,
-    skip_registration: bool = False,
-    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-    verbose: bool = False
-) -> Tuple[int, int]:
+    directory_path: str, 
+    extensions: Optional[Set[str]] = None,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+) -> Dict[str, int]:
     """
     Scan directory for files and register them in the database.
     
     Args:
-        directory_path: Directory to scan
         db: Database connection
         job_id: Job ID to register files under
-        supported_extensions: Set of allowed file extensions (None for all)
-        max_files: Maximum number of files to register
-        skip_registration: If True, only count files but don't try to register them
+        directory_path: Directory to scan
+        extensions: Set of allowed file extensions (None for defaults)
         progress_callback: Optional callback for progress updates
-        verbose: Whether to log verbose progress messages
         
     Returns:
-        Tuple of (total files found, newly registered files)
+        Dictionary with scan statistics
     """
     logger.info(f"Scanning directory: {directory_path}")
     
     if not os.path.isdir(directory_path):
         logger.error(f"Directory not found: {directory_path}")
-        return 0, 0
+        return {'added': 0, 'removed': 0, 'total': 0}
     
-    if supported_extensions is None:
-        from ..utils.file_utils import get_supported_extensions
-        supported_extensions = set(get_supported_extensions().keys())
-        logger.info(f"Using default supported extensions: {supported_extensions}")
+    if extensions is None:
+        extensions = DEFAULT_SUPPORTED_EXTENSIONS
     
-    total_files = 0
-    new_files = 0
+    # Track statistics
+    stats = {
+        'files_scanned': 0,
+        'files_added': 0,
+        'files_removed': 0,
+        'files_total': 0
+    }
+    
+    # Track all file paths found
+    found_files = set()
+    
+    # Start timing scan
     start_time = time.time()
     last_update_time = start_time
     
+    # Scan directory
     try:
         for root, _, files in os.walk(directory_path):
             for filename in files:
                 file_path = os.path.join(root, filename)
                 
-                # Check if we've reached the maximum file limit
-                if max_files is not None and new_files >= max_files:
-                    logger.info(f"Reached maximum file limit of {max_files}, stopping scan")
-                    return total_files, new_files
+                # Update scanned count
+                stats['files_scanned'] += 1
                 
-                # Skip unsupported file types
-                if not is_supported_file(file_path, supported_extensions):
+                # Check if it's a supported file type
+                if not is_supported_file(file_path, extensions):
                     continue
-                    
-                total_files += 1
                 
-                # Update progress more frequently
+                # Add to found file set
+                found_files.add(file_path)
+                
+                # Call progress callback periodically
                 current_time = time.time()
-                if progress_callback and (total_files % 100 == 0 or current_time - last_update_time > 0.5):
+                if progress_callback and (stats['files_scanned'] % 100 == 0 or 
+                                          current_time - last_update_time > 1.0):
                     progress_callback({
-                        'type': 'scan_progress',
-                        'total_files': total_files,
-                        'new_files': new_files,
-                        'current_file': file_path,
-                        'elapsed': current_time - start_time
+                        'type': 'progress',
+                        'files_scanned': stats['files_scanned']
                     })
                     last_update_time = current_time
                 
-                # Skip registration if requested (for use with reset database)
-                if skip_registration:
-                    continue
-                
-                # Register file in database
+                # Get file information
                 try:
                     file_size = os.path.getsize(file_path)
                     modified_time = os.path.getmtime(file_path)
                     file_type = get_file_type(file_path)
                     
+                    # Register file in database
                     if db.register_file(job_id, file_path, file_size, file_type, modified_time):
-                        new_files += 1
-                        
-                        # Log progress every 1000 files only if verbose mode is enabled
-                        if verbose and new_files % 1000 == 0:
-                            elapsed = time.time() - start_time
-                            logger.info(f"Registered {new_files} files so far (total found: {total_files}, elapsed: {elapsed:.2f}s)")
+                        stats['files_added'] += 1
                 except OSError as e:
                     logger.error(f"Error accessing file {file_path}: {e}")
     
+        # Check for removed files
+        removed_count = db.mark_missing_files(job_id, found_files)
+        stats['files_removed'] = removed_count
+        
+        # Get total file count
+        stats['files_total'] = db.get_file_count_for_job(job_id)
+        
+        # Log completion
         elapsed = time.time() - start_time
-        logger.info(f"Directory scan complete: found {total_files} files, "
-                    f"registered {new_files} new files in {elapsed:.2f} seconds")
+        logger.info(f"Directory scan complete: found {len(found_files)} files, "
+                    f"added {stats['files_added']} new files, removed {stats['files_removed']} "
+                    f"files in {elapsed:.2f} seconds")
         
         # Final progress update
         if progress_callback:
             progress_callback({
-                'type': 'scan_complete',
-                'total_files': total_files,
-                'new_files': new_files,
-                'elapsed': elapsed
+                'type': 'completed',
+                'files_added': stats['files_added'],
+                'files_removed': stats['files_removed'],
+                'files_total': stats['files_total']
             })
         
-        return total_files, new_files
+        return {
+            'added': stats['files_added'],
+            'removed': stats['files_removed'],
+            'total': stats['files_total']
+        }
     
     except Exception as e:
         logger.error(f"Error scanning directory {directory_path}: {e}")
-        raise
+        if progress_callback:
+            progress_callback({
+                'type': 'error',
+                'error': str(e)
+            })
+        return {'added': 0, 'removed': 0, 'total': 0}
 
 def scan_file_list(
     file_list: List[str], 
@@ -227,166 +237,81 @@ def scan_file_list(
     
     return total_files, new_files
 
-def find_resumption_point(db: PIIDatabase, job_id: int) -> Dict[str, Any]:
+def find_resumption_point(
+    db: PIIDatabase, 
+    directory: str,
+    job_id: Optional[int] = None
+) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
     """
-    Find the point to resume processing from a previous run.
+    Find a job that can be resumed for a directory.
     
     Args:
         db: Database connection
-        job_id: Job ID to resume
+        directory: Directory path
+        job_id: Specific job ID to check (optional)
         
     Returns:
-        Dictionary with resumption information:
-        - status: 'resumable', 'completed', or 'not_found'
-        - total_files: Total files in job
-        - pending_files: Number of pending files
-        - processing_files: Number of files marked as processing
-        - completed_files: Number of completed files
-        - error_files: Number of files with errors
+        Tuple of (job_id, job_info) or (None, None) if no resumable job
     """
-    # Get job information
-    job = db.get_job(job_id)
-    if not job:
-        return {
-            'status': 'not_found',
-            'job_id': job_id,
-            'message': f"Job {job_id} not found"
-        }
+    if job_id:
+        # Check specific job
+        job = db.get_job(job_id)
+        if job and job.get('directory') == directory:
+            return job_id, job
+        return None, None
     
-    # Job already completed
-    if job['status'] == 'completed':
-        return {
-            'status': 'completed',
-            'job_id': job_id,
-            'total_files': job['total_files'],
-            'completed_files': job['processed_files'],
-            'error_files': job['error_files'],
-            'message': f"Job {job_id} is already completed"
-        }
+    # Find jobs for this directory
+    jobs = db.get_jobs_for_directory(directory)
     
-    # Count files by status
-    cursor = db.conn.cursor()
-    cursor.execute("""
-    SELECT status, COUNT(*) as count FROM files
-    WHERE job_id = ?
-    GROUP BY status
-    """, (job_id,))
+    if not jobs:
+        return None, None
     
-    status_counts = {row['status']: row['count'] for row in cursor.fetchall()}
-    
-    # Calculate total counts
-    pending_files = status_counts.get('pending', 0)
-    processing_files = status_counts.get('processing', 0)
-    completed_files = status_counts.get('completed', 0)
-    error_files = status_counts.get('error', 0)
-    
-    # Determine if job is resumable
-    is_resumable = pending_files > 0 or processing_files > 0
-    
-    result = {
-        'status': 'resumable' if is_resumable else 'not_resumable',
-        'job_id': job_id,
-        'total_files': job['total_files'],
-        'pending_files': pending_files,
-        'processing_files': processing_files,
-        'completed_files': completed_files,
-        'error_files': error_files
-    }
-    
-    if is_resumable:
-        result['message'] = f"Job {job_id} can be resumed: {pending_files} pending, {processing_files} processing"
-    else:
-        result['message'] = f"Job {job_id} cannot be resumed: no pending or processing files"
-    
-    return result
+    # Return the most recent job
+    return jobs[0]['job_id'], jobs[0]
 
 def reset_stalled_files(db: PIIDatabase, job_id: int) -> int:
     """
-    Reset files that were left in 'processing' state due to
-    program interruption.
+    Reset stalled files to pending status.
     
     Args:
         db: Database connection
-        job_id: Job ID to update
+        job_id: Job ID to process
         
     Returns:
-        Number of files reset to 'pending'
+        Number of reset files
     """
-    try:
-        with db.conn:
-            cursor = db.conn.cursor()
-            cursor.execute("""
-            UPDATE files SET status = 'pending', process_start = NULL
-            WHERE job_id = ? AND status = 'processing'
-            """, (job_id,))
-            
-            reset_count = cursor.rowcount
-            
-            if reset_count > 0:
-                logger.info(f"Reset {reset_count} stalled files to 'pending' status")
-            
-            return reset_count
-    except Exception as e:
-        logger.error(f"Error resetting stalled files: {e}")
-        return 0
+    # Reset processing files to pending
+    reset_count = db.reset_processing_files(job_id)
+    
+    if reset_count > 0:
+        logger.info(f"Reset {reset_count} stalled files to 'pending' status")
+    
+    return reset_count
 
 def get_file_statistics(db: PIIDatabase, job_id: int) -> Dict[str, Any]:
     """
-    Get detailed statistics about files in a job.
+    Get statistics about files in a job.
     
     Args:
         db: Database connection
         job_id: Job ID to query
         
     Returns:
-        Dictionary with file statistics
+        Dictionary with statistics
     """
-    try:
-        cursor = db.conn.cursor()
-        
-        # Get file counts by status
-        cursor.execute("""
-        SELECT status, COUNT(*) as count FROM files
-        WHERE job_id = ?
-        GROUP BY status
-        """, (job_id,))
-        status_counts = {row['status']: row['count'] for row in cursor.fetchall()}
-        
-        # Get file counts by type
-        cursor.execute("""
-        SELECT file_type, COUNT(*) as count FROM files
-        WHERE job_id = ?
-        GROUP BY file_type
-        """, (job_id,))
-        type_counts = {row['file_type']: row['count'] for row in cursor.fetchall()}
-        
-        # Get size statistics
-        cursor.execute("""
-        SELECT 
-            MIN(file_size) as min_size,
-            MAX(file_size) as max_size,
-            AVG(file_size) as avg_size,
-            SUM(file_size) as total_size
-        FROM files
-        WHERE job_id = ?
-        """, (job_id,))
-        size_stats = dict(cursor.fetchone())
-        
-        # Get directory counts
-        cursor.execute("""
-        SELECT COUNT(DISTINCT substr(file_path, 1, instr(file_path, '/'))) as dir_count
-        FROM files
-        WHERE job_id = ?
-        """, (job_id,))
-        dir_count = cursor.fetchone()['dir_count']
-        
-        return {
-            'job_id': job_id,
-            'status_counts': status_counts,
-            'type_counts': type_counts,
-            'size_stats': size_stats,
-            'directory_count': dir_count
-        }
-    except Exception as e:
-        logger.error(f"Error getting file statistics: {e}")
-        return {} 
+    # Get status counts
+    status_counts = db.get_file_status_counts(job_id)
+    
+    # Extract counts for common statuses
+    pending = status_counts.get('pending', 0)
+    processing = status_counts.get('processing', 0)
+    completed = status_counts.get('completed', 0)
+    error = status_counts.get('error', 0)
+    
+    return {
+        'pending': pending,
+        'processing': processing,
+        'completed': completed,
+        'error': error,
+        'total': pending + processing + completed + error
+    } 

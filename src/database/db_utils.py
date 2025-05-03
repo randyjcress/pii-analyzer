@@ -389,6 +389,30 @@ class PIIDatabase:
             logger.error(f"Error getting job {job_id}: {e}")
             return None
     
+    def get_job_status(self, job_id: int) -> Optional[str]:
+        """
+        Get the status of a job.
+        
+        Args:
+            job_id: Job ID to get status for
+            
+        Returns:
+            Job status or None if job not found
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+            SELECT status FROM jobs
+            WHERE job_id = ?
+            """, (job_id,))
+            
+            result = cursor.fetchone()
+            return result['status'] if result else None
+            
+        except sqlite3.Error as e:
+            logger.error(f"Error getting job status for job {job_id}: {e}")
+            return None
+    
     # ---- File Management ----
     
     def register_file(self, job_id: int, file_path: str, file_size: int, 
@@ -1135,6 +1159,234 @@ class PIIDatabase:
         except sqlite3.Error as e:
             logger.error(f"Error resetting all files: {e}")
             return 0
+
+    def get_jobs_for_directory(self, directory: str) -> List[Dict[str, Any]]:
+        """
+        Get jobs for a specific directory path, sorted by most recent first.
+        
+        Args:
+            directory: Directory path to find jobs for
+            
+        Returns:
+            List of job dictionaries, sorted by most recent first
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+            SELECT j.* FROM jobs j
+            JOIN job_metadata m ON j.job_id = m.job_id
+            WHERE m.key = 'directory' AND m.value = ?
+            ORDER BY j.start_time DESC
+            """, (directory,))
+            
+            jobs = []
+            for row in cursor.fetchall():
+                job = dict(row)
+                
+                # Get metadata for this job
+                cursor.execute("""
+                SELECT key, value FROM job_metadata
+                WHERE job_id = ?
+                """, (job['job_id'],))
+                
+                metadata = {row['key']: row['value'] for row in cursor.fetchall()}
+                job['metadata'] = metadata
+                job['directory'] = metadata.get('directory', '')
+                
+                jobs.append(job)
+                
+            return jobs
+            
+        except sqlite3.Error as e:
+            logger.error(f"Error getting jobs for directory {directory}: {e}")
+            return []
+
+    def mark_missing_files(self, job_id: int, found_files: Set[str]) -> int:
+        """
+        Mark files as missing (error) if they are in the database but not in the found_files set.
+        
+        Args:
+            job_id: Job ID to check files for
+            found_files: Set of file paths that were found during scanning
+            
+        Returns:
+            Number of files marked as missing
+        """
+        try:
+            # Get all file paths for this job
+            cursor = self.conn.cursor()
+            cursor.execute("""
+            SELECT file_id, file_path FROM files
+            WHERE job_id = ?
+            """, (job_id,))
+            
+            db_files = {row['file_path']: row['file_id'] for row in cursor.fetchall()}
+            
+            # Find files that are in the database but not in found_files
+            missing_files = set(db_files.keys()) - found_files
+            
+            # Mark missing files as error
+            if missing_files:
+                with self.conn:
+                    for file_path in missing_files:
+                        file_id = db_files[file_path]
+                        self.conn.execute("""
+                        UPDATE files
+                        SET status = 'error', error_message = 'File no longer exists'
+                        WHERE file_id = ?
+                        """, (file_id,))
+                        
+                return len(missing_files)
+            return 0
+            
+        except sqlite3.Error as e:
+            logger.error(f"Error marking missing files for job {job_id}: {e}")
+            return 0
+
+    def get_file_count_for_job(self, job_id: int) -> int:
+        """
+        Get the total number of files for a job.
+        
+        Args:
+            job_id: Job ID to get count for
+            
+        Returns:
+            Total number of files
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+            SELECT COUNT(*) as count FROM files
+            WHERE job_id = ?
+            """, (job_id,))
+            
+            result = cursor.fetchone()
+            return result['count'] if result else 0
+            
+        except sqlite3.Error as e:
+            logger.error(f"Error getting file count for job {job_id}: {e}")
+            return 0
+
+    def get_completed_count_for_job(self, job_id: int) -> int:
+        """
+        Get the number of completed files for a job.
+        
+        Args:
+            job_id: Job ID to get count for
+            
+        Returns:
+            Number of completed files
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+            SELECT COUNT(*) as count FROM files
+            WHERE job_id = ? AND status = 'completed'
+            """, (job_id,))
+            
+            result = cursor.fetchone()
+            return result['count'] if result else 0
+            
+        except sqlite3.Error as e:
+            logger.error(f"Error getting completed count for job {job_id}: {e}")
+            return 0
+
+    def get_file_status_counts(self, job_id: int) -> Dict[str, int]:
+        """
+        Get counts of files by status for a job.
+        
+        Args:
+            job_id: Job ID to get counts for
+            
+        Returns:
+            Dictionary mapping status to count
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+            SELECT status, COUNT(*) as count FROM files
+            WHERE job_id = ?
+            GROUP BY status
+            """, (job_id,))
+            
+            return {row['status']: row['count'] for row in cursor.fetchall()}
+            
+        except sqlite3.Error as e:
+            logger.error(f"Error getting file status counts for job {job_id}: {e}")
+            return {}
+
+    def reset_processing_files(self, job_id: int) -> int:
+        """
+        Reset files in 'processing' status to 'pending'.
+        
+        Args:
+            job_id: Job ID to reset files for
+            
+        Returns:
+            Number of files reset
+        """
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute("""
+                UPDATE files
+                SET status = 'pending', process_start = NULL
+                WHERE job_id = ? AND status = 'processing'
+                """, (job_id,))
+                
+                return cursor.rowcount
+                
+        except sqlite3.Error as e:
+            logger.error(f"Error resetting processing files for job {job_id}: {e}")
+            return 0
+
+    def create_job(self, directory: str, name: str = "", settings: Dict[str, Any] = None) -> int:
+        """
+        Create a new job for the given directory.
+        
+        Args:
+            directory: Directory to process
+            name: Optional name for the job
+            settings: Optional settings for the job
+            
+        Returns:
+            Job ID of the newly created job
+        """
+        timestamp = datetime.now()
+        if not name:
+            # Use the directory name as the job name if not provided
+            name = f"PII Analysis - {os.path.basename(directory)}"
+            
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                
+                # Insert job record
+                cursor.execute("""
+                INSERT INTO jobs (name, start_time, last_updated, status, settings)
+                VALUES (?, ?, ?, ?, ?)
+                """, (
+                    name,
+                    timestamp,
+                    timestamp,
+                    'created',
+                    json.dumps(settings) if settings else None
+                ))
+                
+                job_id = cursor.lastrowid
+                
+                # Store directory as metadata
+                cursor.execute("""
+                INSERT INTO job_metadata (job_id, key, value)
+                VALUES (?, ?, ?)
+                """, (job_id, 'directory', directory))
+                
+                logger.info(f"Created new job {job_id} for directory: {directory}")
+                return job_id
+                
+        except sqlite3.Error as e:
+            logger.error(f"Error creating job for directory {directory}: {e}")
+            raise
 
 
 # Factory function to get a database instance

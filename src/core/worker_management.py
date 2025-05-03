@@ -12,6 +12,9 @@ import multiprocessing
 import queue
 import threading
 import os
+import psutil
+import setproctitle
+import math
 from typing import Callable, List, Dict, Any, Optional, Tuple
 
 from src.database.db_utils import get_database, PIIDatabase
@@ -22,6 +25,10 @@ logger = logging.getLogger('worker_management')
 
 # Thread-local storage for database connections
 thread_local = threading.local()
+
+# Global OCR semaphore to limit OCR processes
+# Will be initialized during process_files_parallel
+OCR_SEMAPHORE = None
 
 def get_thread_db(db_path: str) -> PIIDatabase:
     """
@@ -62,6 +69,55 @@ class SafeQueue:
         with self.lock:
             return self.processed, self.errors
 
+def calculate_optimal_workers() -> int:
+    """
+    Calculate the optimal number of worker processes based on system resources.
+    Considers CPU cores, memory, and whether running on an NFS/networked storage.
+    
+    Returns:
+        Optimal number of worker processes
+    """
+    try:
+        # Get CPU cores and memory
+        cpu_count = psutil.cpu_count(logical=True)
+        memory_gb = psutil.virtual_memory().total / (1024 * 1024 * 1024)
+        
+        # Check if we're accessing network storage
+        # This is a simplified check - might need adjustment
+        is_network_storage = False
+        for part in psutil.disk_partitions(all=True):
+            if 'nfs' in part.fstype.lower() or 'cifs' in part.fstype.lower():
+                is_network_storage = True
+                break
+        
+        # Calculate base worker count based on CPU
+        # Use 75% of available cores, minimum 2
+        base_workers = max(2, int(cpu_count * 0.75))
+        
+        # Adjust based on memory - each worker might use ~500MB
+        # Allow up to 80% of system memory for workers
+        max_by_memory = int((memory_gb * 0.8) / 0.5)
+        
+        # Take the minimum to avoid oversubscription
+        optimal_workers = min(base_workers, max_by_memory)
+        
+        # If using network storage, limit more aggressively to avoid I/O bottlenecks
+        if is_network_storage:
+            network_adjusted = max(2, int(optimal_workers * 0.7))
+            logger.info(f"Network storage detected, reducing workers from {optimal_workers} to {network_adjusted}")
+            optimal_workers = network_adjusted
+        
+        # Cap at 32 workers maximum regardless of hardware
+        optimal_workers = min(optimal_workers, 32)
+        
+        logger.info(f"Calculated optimal workers: {optimal_workers} (CPU: {cpu_count}, Memory: {memory_gb:.1f}GB)")
+        return optimal_workers
+    
+    except Exception as e:
+        logger.warning(f"Error calculating optimal workers: {e}, using fallback value")
+        # Fallback to conservative value
+        return 4
+
 def process_files_parallel(
     db: PIIDatabase,
     job_id: int,
@@ -89,8 +145,8 @@ def process_files_parallel(
         Dictionary with processing statistics
     """
     if not max_workers:
-        # Auto-determine based on CPU count
-        max_workers = max(1, multiprocessing.cpu_count() - 1)
+        # Auto-determine based on system resources
+        max_workers = calculate_optimal_workers()
     
     if settings is None:
         settings = {}
@@ -98,15 +154,23 @@ def process_files_parallel(
     # Get the database path for worker processes
     db_path = db.db_path
     
+    # Set process title for main process
+    setproctitle.setproctitle(f"pii-main-{os.getpid()}")
+    
     start_time = time.time()
     stats_queue = SafeQueue()
     files_remaining = True
     processed_count = 0
+    error_count = 0
     
+    # Print system info
+    cpu_count = psutil.cpu_count(logical=True)
+    memory_gb = psutil.virtual_memory().total / (1024 * 1024 * 1024)
+    logger.info(f"System info: {cpu_count} CPU cores, {memory_gb:.1f}GB memory")
     logger.info(f"Starting parallel processing with {max_workers} worker processes")
     
     # Create a process pool with fixed number of workers
-    # Use ProcessPoolExecutor instead of ThreadPoolExecutor for true parallelism
+    # Use ProcessPoolExecutor for true parallelism
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         while files_remaining and (max_files is None or processed_count < max_files):
             # Get batch of pending files
@@ -122,9 +186,13 @@ def process_files_parallel(
             
             # Submit jobs to process pool
             futures = []
-            for file_id, file_path in pending_files:
+            for i, (file_id, file_path) in enumerate(pending_files):
                 # Mark file as processing
                 if db.mark_file_processing(file_id):
+                    # Assign a worker ID for tracking
+                    worker_settings = settings.copy()
+                    worker_settings['worker_id'] = i
+                    
                     futures.append(
                         executor.submit(
                             process_single_file_process_safe,
@@ -132,14 +200,17 @@ def process_files_parallel(
                             file_path,
                             db_path,
                             job_id,
-                            settings
+                            worker_settings
                         )
                     )
             
             # Wait for the batch to complete
+            batch_start_time = time.time()
+            batch_files_processed = 0
             for future in concurrent.futures.as_completed(futures):
                 try:
                     result = future.result()
+                    batch_files_processed += 1
                     
                     if result.get('success', False):
                         # Update the database with results
@@ -151,10 +222,12 @@ def process_files_parallel(
                         )
                         db.mark_file_completed(result['file_id'], job_id)
                         stats_queue.add_processed()
+                        processed_count += 1
                     else:
                         # Mark as error
                         db.mark_file_error(result['file_id'], job_id, result.get('error_message', 'Unknown error'))
                         stats_queue.add_error()
+                        error_count += 1
                     
                     # Call progress callback if provided
                     if progress_callback:
@@ -166,15 +239,16 @@ def process_files_parallel(
                             'error': result.get('error_message') if not result.get('success', False) else None
                         })
                     
-                    # Check progress
-                    processed, errors = stats_queue.get_stats()
-                    if processed % 10 == 0 and processed > 0:
+                    # Check progress more frequently
+                    total_processed = processed_count + error_count
+                    if total_processed % 5 == 0 and total_processed > 0:
                         elapsed = time.time() - start_time
-                        rate = processed / elapsed if elapsed > 0 else 0
-                        logger.info(f"Processed {processed} files in {elapsed:.2f}s ({rate:.2f} files/sec)")
+                        rate = total_processed / elapsed if elapsed > 0 else 0
+                        logger.info(f"Processed {total_processed} files in {elapsed:.2f}s ({rate:.2f} files/sec)")
                         
                 except Exception as e:
                     logger.error(f"Worker process error: {e}")
+                    error_count += 1
                     
                     # Call progress callback for errors if provided
                     if progress_callback:
@@ -183,27 +257,34 @@ def process_files_parallel(
                             'error': str(e)
                         })
             
-            # Update processed count
-            processed_count, error_count = stats_queue.get_stats()
+            # Log batch statistics
+            batch_elapsed = time.time() - batch_start_time
+            batch_rate = batch_files_processed / batch_elapsed if batch_elapsed > 0 else 0
+            logger.info(f"Batch completed: {batch_files_processed} files in {batch_elapsed:.2f}s ({batch_rate:.2f} files/sec)")
+            
+            # Check for resource exhaustion
+            mem = psutil.virtual_memory()
+            if mem.percent > 90:
+                logger.warning(f"Memory pressure detected ({mem.percent}% used), reducing batch size")
+                batch_size = max(1, batch_size // 2)
     
     # Update job status
     elapsed = time.time() - start_time
-    processed_count, error_count = stats_queue.get_stats()
     rate = processed_count / elapsed if elapsed > 0 else 0
     
     if not files_remaining:
         db.update_job_status(job_id, 'completed')
-        logger.info(f"Job completed: processed {processed_count} files in {elapsed:.2f}s ({rate:.2f} files/sec)")
+        logger.info(f"Job completed: processed {processed_count} files ({error_count} errors) in {elapsed:.2f}s ({rate:.2f} files/sec)")
     else:
         db.update_job_status(job_id, 'interrupted')
-        logger.info(f"Job interrupted: processed {processed_count} files in {elapsed:.2f}s ({rate:.2f} files/sec)")
+        logger.info(f"Job interrupted: processed {processed_count} files ({error_count} errors) in {elapsed:.2f}s ({rate:.2f} files/sec)")
     
     return {
-        'job_id': job_id,
-        'total_processed': processed_count,
-        'total_errors': error_count,
-        'elapsed_time': elapsed,
-        'files_per_second': rate
+        'processed': processed_count,
+        'errors': error_count,
+        'elapsed': elapsed,
+        'rate': rate,
+        'status': 'completed' if not files_remaining else 'interrupted'
     }
 
 def process_single_file_process_safe(
@@ -214,46 +295,50 @@ def process_single_file_process_safe(
     settings: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
-    Process a single file in a separate process with its own database connection.
+    Process a single file safely in a separate process.
+    This function is the entry point for ProcessPoolExecutor workers.
     
     Args:
         file_id: ID of the file to process
         file_path: Path to the file
         db_path: Path to the database
-        job_id: Job ID this file belongs to
-        settings: Additional settings to pass to processing function
+        job_id: ID of the current job
+        settings: Processing settings
         
     Returns:
-        Dictionary with processing results
+        Processing result dictionary
     """
-    from src.core.pii_analyzer_adapter import analyze_file
-    
-    # Set process name for better monitoring
     try:
-        import setproctitle
-        setproctitle.setproctitle(f"pii-worker-{os.path.basename(file_path)}")
-    except ImportError:
-        pass
-    
-    start_time = time.time()
-    
-    try:
+        # Import the pii_analyzer_adapter in the worker process
+        from src.core.pii_analyzer_adapter import analyze_file
+        
         # Process the file
+        start_time = time.time()
+        
+        # Set process title for identifying in monitoring tools
+        setproctitle.setproctitle(f"pii-worker-{settings.get('worker_id', os.getpid())}")
+        
         result = analyze_file(file_path, settings)
         
-        # Add file ID for tracking
+        # Add file ID and path to result for tracking
         result['file_id'] = file_id
+        result['file_path'] = file_path
+        
+        # Add timing data
+        processing_time = time.time() - start_time
+        result['processing_time'] = processing_time
         
         return result
+    
     except Exception as e:
-        # Return error information
+        # Catch any exception and return a standardized error result
+        logger.error(f"Error in worker process for file {file_path}: {str(e)}")
         return {
             'file_id': file_id,
             'file_path': file_path,
             'success': False,
-            'error_message': f"Process error: {str(e)}",
-            'entities': [],
-            'processing_time': time.time() - start_time
+            'error_message': f"Worker process exception: {str(e)}",
+            'processing_time': time.time() - start_time if 'start_time' in locals() else 0
         }
 
 def process_single_file_thread_safe(
@@ -266,58 +351,53 @@ def process_single_file_thread_safe(
     stats_queue: SafeQueue
 ) -> Dict[str, Any]:
     """
-    Process a single file with thread-safe database handling.
+    Process a single file safely in a worker thread.
+    This function is the entry point for ThreadPoolExecutor workers.
     
     Args:
         file_id: ID of the file to process
         file_path: Path to the file
         db_path: Path to the database
-        job_id: Job ID this file belongs to
-        processing_func: Function to perform the actual processing
-        settings: Additional settings to pass to processing function
-        stats_queue: Queue to track statistics
+        job_id: ID of the current job
+        processing_func: Function to process the file
+        settings: Processing settings
+        stats_queue: Queue for tracking statistics
         
     Returns:
-        Dictionary with processing results
+        Processing result
     """
     # Get thread-local database connection
     db = get_thread_db(db_path)
     
-    start_time = time.time()
-    
     try:
         # Process the file
-        result = processing_func(file_path, settings)
-        
-        # Extract entities
-        entities = result.get('entities', [])
-        
-        # Extract metadata
-        metadata = result.get('metadata', {})
-        
-        # Store results in database
-        processing_time = time.time() - start_time
-        db.store_file_results(file_id, processing_time, entities, metadata)
-        
-        # Mark file as completed
-        db.mark_file_completed(file_id, job_id)
+        result = process_single_file(file_id, file_path, db, job_id, processing_func, settings)
         
         # Update statistics
-        stats_queue.add_processed()
-        
-        # Add file info to result for progress reporting
-        result['file_id'] = file_id
-        result['processing_time'] = processing_time
+        if result.get('success', False):
+            stats_queue.add_processed()
+        else:
+            stats_queue.add_error()
         
         return result
+    
     except Exception as e:
-        # Mark as error and update statistics
+        # Log the error
+        logger.error(f"Error processing file {file_path}: {e}")
+        
+        # Mark as error in the database
         db.mark_file_error(file_id, job_id, str(e))
+        
+        # Update statistics
         stats_queue.add_error()
         
-        # Log and re-raise the exception
-        logger.error(f"Error processing file {file_path}: {e}")
-        raise
+        # Return error result
+        return {
+            'file_id': file_id,
+            'file_path': file_path,
+            'success': False,
+            'error_message': str(e)
+        }
 
 def process_single_file(
     file_id: int,
@@ -328,41 +408,77 @@ def process_single_file(
     settings: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
-    Process a single file and store results in database.
-    This version should only be used for single-threaded processing.
+    Process a single file, handling database updates.
     
     Args:
         file_id: ID of the file to process
         file_path: Path to the file
         db: Database connection
-        job_id: Job ID this file belongs to
-        processing_func: Function to perform the actual processing
-        settings: Additional settings to pass to processing function
+        job_id: ID of the current job
+        processing_func: Function to process the file
+        settings: Processing settings
         
     Returns:
-        Dictionary with processing results
+        Processing result dictionary
     """
-    start_time = time.time()
+    # Mark file as processing
+    if not db.mark_file_processing(file_id):
+        return {
+            'file_id': file_id,
+            'file_path': file_path,
+            'success': False,
+            'error_message': "Could not mark file as processing"
+        }
     
     try:
+        # Measure processing time
+        start_time = time.time()
+        
         # Process the file
         result = processing_func(file_path, settings)
         
-        # Extract entities
-        entities = result.get('entities', [])
+        # Add file ID to result
+        result['file_id'] = file_id
+        result['file_path'] = file_path
         
-        # Store results in database
+        # Calculate processing time
         processing_time = time.time() - start_time
-        db.store_file_results(file_id, processing_time, entities)
+        result['processing_time'] = processing_time
         
-        # Mark file as completed
-        db.mark_file_completed(file_id, job_id)
+        # Update the database
+        if result.get('success', False):
+            # Store entities and mark as completed
+            db.store_file_results(
+                file_id, 
+                processing_time, 
+                result.get('entities', []), 
+                result.get('metadata', {})
+            )
+            db.mark_file_completed(file_id, job_id)
+        else:
+            # Mark as error
+            db.mark_file_error(
+                file_id, 
+                job_id, 
+                result.get('error_message', 'Unknown error')
+            )
         
         return result
+    
     except Exception as e:
-        # Log and re-raise the exception
+        # Log the error
         logger.error(f"Error processing file {file_path}: {e}")
-        raise
+        
+        # Mark as error in the database
+        db.mark_file_error(file_id, job_id, str(e))
+        
+        # Return error result
+        return {
+            'file_id': file_id,
+            'file_path': file_path,
+            'success': False,
+            'error_message': str(e)
+        }
 
 def estimate_completion_time(
     db: PIIDatabase,

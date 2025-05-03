@@ -10,6 +10,10 @@ import logging
 import time
 import glob
 import re
+import multiprocessing
+import threading
+import signal
+import psutil
 from typing import Dict, Any, List, Optional
 
 # Add the project root to path if needed
@@ -20,6 +24,8 @@ from rich.console import Console
 from rich.progress import Progress, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.table import Table
 from rich.prompt import Prompt
+from rich.panel import Panel
+from rich.live import Live
 
 from src.database.db_utils import get_database
 from src.core.file_discovery import (
@@ -30,7 +36,8 @@ from src.core.file_discovery import (
 )
 from src.core.worker_management import (
     process_files_parallel,
-    estimate_completion_time
+    estimate_completion_time,
+    calculate_optimal_workers
 )
 from src.core.pii_analyzer_adapter import analyze_file
 
@@ -76,7 +83,7 @@ Examples:
   # Resume without rescanning the directory
   python src/process_files.py /path/to/documents --db-path results.db --resume --skip-scan
   
-  # Process with 8 worker threads
+  # Process with 8 worker processes
   python src/process_files.py /path/to/documents --workers 8
   
   # Export results to JSON
@@ -119,7 +126,7 @@ Examples:
     parser.add_argument('--skip-scan', action='store_true',
                         help='Skip directory scanning when resuming (use existing files in database)')
     parser.add_argument('--workers', type=int, default=None,
-                        help='Number of worker threads (default: auto)')
+                        help='Number of worker processes (default: auto)')
     parser.add_argument('--batch-size', type=int, default=10,
                         help='Number of files to process in a batch')
     parser.add_argument('--max-files', type=int, default=None,
@@ -136,6 +143,8 @@ Examples:
     # File filtering
     parser.add_argument('--extensions', type=str, default=None,
                         help='Comma-separated list of file extensions to process')
+    parser.add_argument('--file-size-limit', type=int, default=100,
+                        help='Maximum file size in MB to process (default: 100MB)')
     
     # PII analyzer options
     parser.add_argument('--threshold', type=float, default=0.7,
@@ -146,10 +155,18 @@ Examples:
                         help='Force OCR for text extraction')
     parser.add_argument('--ocr-dpi', type=int, default=300,
                         help='DPI for OCR')
-    parser.add_argument('--ocr-threads', type=int, default=0,
-                        help='Number of OCR threads (0=auto)')
+    parser.add_argument('--ocr-threads', type=int, default=1,
+                        help='Number of OCR threads per file (default: 1)')
+    parser.add_argument('--max-ocr', type=int, default=None, 
+                        help='Maximum number of concurrent OCR processes (default: auto)')
     parser.add_argument('--max-pages', type=int, default=None,
                         help='Maximum pages to process per PDF')
+    
+    # Performance monitoring
+    parser.add_argument('--monitor', action='store_true',
+                        help='Show real-time performance monitoring')
+    parser.add_argument('--profile', action='store_true',
+                        help='Run with performance profiling and show report at end')
     
     # Output options
     parser.add_argument('--export', type=str, default=None,
@@ -198,90 +215,359 @@ def show_status(db_path: str, job_id: Optional[int] = None):
             'running': 'blue',
             'interrupted': 'yellow',
             'error': 'red',
+            'unknown': 'magenta'
         }.get(status, 'white')
         
-        console.print(f"\n[bold]Job {job_id}:[/bold] {job.get('name', 'Unnamed')}")
-        console.print(f"Status: [{status_color}]{status}[/{status_color}]")
-        console.print(f"Started: {job.get('start_time', 'unknown')}")
-        console.print(f"Last updated: {job.get('last_updated', 'unknown')}")
+        # Create a table for job details
+        table = Table(title=f"Job {job_id} - {job.get('directory', 'unknown')}")
+        table.add_column("Property", style="cyan")
+        table.add_column("Value")
+        
+        # Add rows
+        table.add_row("Status", f"[{status_color}]{status}[/{status_color}]")
+        table.add_row("Start Time", job.get('start_time', 'unknown'))
+        table.add_row("Last Update", job.get('last_update', 'unknown'))
+        
+        if 'file_count' in job:
+            table.add_row("Total Files", str(job.get('file_count', 0)))
         
         # Get file statistics
         stats = get_file_statistics(db, job_id)
+        completed = stats.get('completed', 0)
+        pending = stats.get('pending', 0)
+        processing = stats.get('processing', 0)
+        error = stats.get('error', 0)
+        total = completed + pending + processing + error
         
-        # Create table for file status
-        status_table = Table(title="File Status", show_header=True, header_style="bold")
-        status_table.add_column("Status", style="cyan")
-        status_table.add_column("Count", justify="right", style="green")
+        table.add_row("Files Completed", f"[green]{completed}[/green] ({completed/total*100:.1f}% of {total})")
+        table.add_row("Files Pending", f"[blue]{pending}[/blue] ({pending/total*100:.1f}% of {total})")
+        table.add_row("Files Processing", f"[yellow]{processing}[/yellow] ({processing/total*100:.1f}% of {total})")
+        table.add_row("Files Error", f"[red]{error}[/red] ({error/total*100:.1f}% of {total})")
         
-        # Add rows
-        for status, count in stats.get('status_counts', {}).items():
-            status_table.add_row(status, str(count))
-        
-        # If no status counts, add an empty row
-        if not stats.get('status_counts'):
-            status_table.add_row("No files", "0")
-            
-        console.print(status_table)
-        
-        # Create table for file types
-        type_table = Table(title="File Types", show_header=True, header_style="bold")
-        type_table.add_column("Extension", style="cyan")
-        type_table.add_column("Count", justify="right", style="green")
-        
-        # Add rows sorted by count (descending)
-        sorted_types = sorted(stats.get('type_counts', {}).items(), key=lambda x: x[1], reverse=True)
-        for ext, count in sorted_types:
-            type_table.add_row(ext, str(count))
-            
-        # If no type counts, add an empty row
-        if not sorted_types:
-            type_table.add_row("No files", "0")
-            
-        console.print(type_table)
-        
-        # Size statistics
-        size_stats = stats.get('size_stats', {})
-        total_size = size_stats.get('total_size', 0)
-        avg_size = size_stats.get('avg_size', 0)
-        max_size = size_stats.get('max_size', 0)
-        
-        size_table = Table(title="Size Statistics", show_header=True, header_style="bold")
-        size_table.add_column("Metric", style="cyan")
-        size_table.add_column("Value", justify="right", style="green")
-        
-        if total_size is not None:
-            size_table.add_row("Total size", f"{total_size / (1024*1024):.2f} MB")
-        else:
-            size_table.add_row("Total size", "0.00 MB")
-            
-        if avg_size is not None:
-            size_table.add_row("Average size", f"{avg_size / 1024:.2f} KB")
-        else:
-            size_table.add_row("Average size", "0.00 KB")
-            
-        if max_size is not None:
-            size_table.add_row("Largest file", f"{max_size / 1024:.2f} KB")
-        else:
-            size_table.add_row("Largest file", "0.00 KB")
-            
-        console.print(size_table)
-        
-        # If job is running, show estimated completion time
-        if job.get('status') == 'running':
+        # Estimate completion
+        if status == 'running' and completed > 0 and pending > 0:
             estimate = estimate_completion_time(db, job_id)
+            remaining_time = estimate.get('remaining_seconds', 0)
+            remaining_hours = remaining_time // 3600
+            remaining_minutes = (remaining_time % 3600) // 60
+            remaining_seconds = remaining_time % 60
             
-            progress_table = Table(title="Estimated Completion", show_header=True, header_style="bold")
-            progress_table.add_column("Metric", style="cyan")
-            progress_table.add_column("Value", justify="right", style="green")
+            estimated_completion = estimate.get('estimated_completion', 'unknown')
+            rate = estimate.get('files_per_second', 0)
             
-            progress_table.add_row("Progress", f"{estimate.get('percent_complete', 0):.1f}%")
-            progress_table.add_row("Processing rate", f"{estimate.get('processing_rate', 0):.2f} files/sec")
-            progress_table.add_row("Est. time remaining", estimate.get('estimated_remaining_time', 'unknown'))
-            
-            console.print(progress_table)
+            table.add_row("Processing Rate", f"{rate:.2f} files/second")
+            table.add_row("Time Remaining", f"{remaining_hours:.0f}h {remaining_minutes:.0f}m {remaining_seconds:.0f}s")
+            table.add_row("Estimated Completion", estimated_completion)
+        
+        console.print(table)
+        
+        # Add a separator
+        console.print("")
+
+def process_directory(args):
+    """
+    Process a directory using the PII analyzer
     
-    # Close database
-    db.close()
+    Args:
+        args: Parsed command-line arguments
+    """
+    if not args.directory:
+        console.print("[bold red]Error:[/bold red] Directory is required")
+        return
+    
+    # Expand directory path
+    directory = os.path.abspath(args.directory)
+    
+    # Check if directory exists
+    if not os.path.isdir(directory):
+        console.print(f"[bold red]Error:[/bold red] Directory not found: {directory}")
+        return
+    
+    # Connect to database
+    db = get_database(args.db_path)
+    
+    # Get extensions to process
+    extensions = None
+    if args.extensions:
+        extensions = set('.' + ext.strip().lstrip('.') for ext in args.extensions.split(','))
+    else:
+        extensions = DEFAULT_EXTENSIONS
+    
+    # Process new job or resume existing job
+    if args.resume:
+        # Resume existing job
+        job_id, job_info = find_resumption_point(db, directory, args.job_id)
+        if not job_id:
+            if args.job_id:
+                console.print(f"[bold red]Error:[/bold red] Job ID {args.job_id} not found or not associated with {directory}")
+            else:
+                console.print(f"[bold red]Error:[/bold red] No existing job found for {directory}")
+            return
+        
+        # If job is already completed
+        if job_info.get('status') == 'completed' and not args.force_restart:
+            console.print(f"[bold green]Job {job_id} for {directory} is already completed.[/bold green]")
+            return
+        
+        # Reset stalled files
+        reset_stalled_files(db, job_id)
+        
+        # Display job information
+        console.print(f"[bold blue]Resuming job {job_id} for {directory}[/bold blue]")
+        
+        # Scan directory if needed
+        if not args.skip_scan:
+            console.print(f"Scanning directory {directory} for files...")
+            
+            # Define callback for progress updates
+            def scan_progress_callback(state):
+                if state['type'] == 'progress':
+                    files_scanned = state.get('files_scanned', 0)
+                    console.print(f"Scanned {files_scanned} files...")
+                elif state['type'] == 'completed':
+                    files_added = state.get('files_added', 0)
+                    files_removed = state.get('files_removed', 0)
+                    files_total = state.get('files_total', 0)
+                    console.print(f"Scan completed. Added {files_added} files, removed {files_removed} files, total {files_total} files.")
+            
+            # Scan directory and update database
+            result = scan_directory(
+                db, 
+                job_id, 
+                directory, 
+                extensions=extensions, 
+                progress_callback=scan_progress_callback
+            )
+            
+            console.print(f"Added {result['added']} new files, removed {result['removed']} missing files")
+        else:
+            console.print("[yellow]Skipping directory scan as requested[/yellow]")
+    else:
+        # Start new job
+        console.print(f"[bold blue]Starting new job for {directory}[/bold blue]")
+        
+        # Create job in database
+        job_id = db.create_job(directory)
+        
+        # Scan directory for files
+        console.print(f"Scanning directory {directory} for files...")
+        
+        # Define callback for progress updates
+        def scan_progress_callback(state):
+            if state['type'] == 'progress':
+                files_scanned = state.get('files_scanned', 0)
+                console.print(f"Scanned {files_scanned} files...")
+            elif state['type'] == 'completed':
+                files_added = state.get('files_added', 0)
+                files_total = state.get('files_total', 0)
+                console.print(f"Scan completed. Added {files_added} files, total {files_total} files.")
+        
+        # Scan directory and add files to database
+        result = scan_directory(
+            db, 
+            job_id, 
+            directory, 
+            extensions=extensions, 
+            progress_callback=scan_progress_callback
+        )
+        
+        console.print(f"Added {result['added']} files to the database")
+    
+    # Get stats before processing
+    stats = get_file_statistics(db, job_id)
+    pending_count = stats.get('pending', 0)
+    
+    if pending_count == 0:
+        console.print("[yellow]No pending files to process.[/yellow]")
+        return
+    
+    # Prepare PII analyzer settings
+    settings = {
+        'threshold': args.threshold,
+        'force_ocr': args.ocr,
+        'ocr_dpi': args.ocr_dpi,
+        'ocr_threads': args.ocr_threads,
+        'max_ocr': args.max_ocr,
+        'max_pages': args.max_pages,
+        'debug': args.debug,
+        'file_size_limit': args.file_size_limit * 1024 * 1024,  # Convert to bytes
+    }
+    
+    if args.entities:
+        settings['entities'] = args.entities.split(',')
+    
+    # Update job status
+    db.update_job_status(job_id, 'running')
+    
+    # Determine number of workers
+    max_workers = args.workers
+    if max_workers is None:
+        max_workers = calculate_optimal_workers()
+        console.print(f"Automatically selected {max_workers} worker processes based on system resources")
+    
+    console.print(f"[bold blue]Starting processing with {max_workers} worker processes...[/bold blue]")
+    
+    # Set up signal handling for graceful termination
+    def signal_handler(sig, frame):
+        console.print("\n[yellow]Interrupting processing...[/yellow]")
+        db.update_job_status(job_id, 'interrupted')
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    # Get total file count for progress tracking
+    total_files = db.get_file_count_for_job(job_id)
+    completed_files = stats.get('completed', 0)
+    
+    # Monitor worker processes if requested
+    if args.monitor:
+        # Start monitoring in a separate thread
+        monitor_stop_event = threading.Event()
+        monitor_thread = threading.Thread(
+            target=monitor_performance,
+            args=(monitor_stop_event, max_workers)
+        )
+        monitor_thread.daemon = True
+        monitor_thread.start()
+    
+    # Process files with progress display
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console
+    ) as progress:
+        progress_task = progress.add_task(
+            f"Processed: {completed_files} files", 
+            total=total_files,
+            completed=completed_files
+        )
+        
+        last_update_time = time.time()
+        last_completed = completed_files
+        
+        # Define progress callback
+        def progress_callback(state):
+            nonlocal last_update_time, last_completed
+            
+            if state['type'] == 'file_completed':
+                # Increment completed count
+                completed_count = db.get_completed_count_for_job(job_id)
+                progress.update(progress_task, completed=completed_count, 
+                                description=f"Processed: {completed_count} files")
+                
+                # Calculate processing rate every 10 files
+                current_time = time.time()
+                if completed_count % 10 == 0:
+                    elapsed = current_time - last_update_time
+                    files_processed = completed_count - last_completed
+                    
+                    if elapsed > 0 and files_processed > 0:
+                        rate = files_processed / elapsed
+                        progress.console.print(f"Processing rate: {rate:.2f} files/second")
+                        
+                        last_update_time = current_time
+                        last_completed = completed_count
+            
+            elif state['type'] == 'file_error':
+                # Log the error
+                file_path = state.get('file_path', 'unknown')
+                error = state.get('error', 'Unknown error')
+                logger.error(f"Error processing file {file_path}: {error}")
+        
+        # Process files in parallel
+        result = process_files_parallel(
+            db,
+            job_id,
+            analyze_file,
+            max_workers=max_workers,
+            batch_size=args.batch_size,
+            max_files=args.max_files,
+            settings=settings,
+            progress_callback=progress_callback
+        )
+        
+        # Update job status
+        if result['status'] == 'completed':
+            db.update_job_status(job_id, 'completed')
+        else:
+            db.update_job_status(job_id, 'interrupted')
+    
+    # Stop monitoring if active
+    if args.monitor:
+        monitor_stop_event.set()
+        monitor_thread.join(timeout=1.0)
+    
+    # Display final statistics
+    stats = get_file_statistics(db, job_id)
+    completed = stats.get('completed', 0)
+    error = stats.get('error', 0)
+    total = db.get_file_count_for_job(job_id)
+    elapsed = result['elapsed']
+    rate = result['rate']
+    
+    console.print(f"\n[bold green]Processing completed![/bold green]")
+    console.print(f"Processed {completed} files with {error} errors in {elapsed:.2f} seconds")
+    console.print(f"Average processing rate: {rate:.2f} files/second")
+    console.print(f"Job status: {db.get_job_status(job_id)}")
+
+def monitor_performance(stop_event, worker_count):
+    """
+    Monitor system performance metrics and display in console
+    
+    Args:
+        stop_event: Event to signal when monitoring should stop
+        worker_count: Number of worker processes to expect
+    """
+    try:
+        # Initialize console for monitoring
+        monitor_console = Console()
+        
+        with Live(Panel("[bold]Starting performance monitoring...[/bold]"), 
+                  console=monitor_console, refresh_per_second=1, transient=True) as live:
+            while not stop_event.is_set():
+                # Get CPU and memory info
+                cpu_percent = psutil.cpu_percent(interval=None)
+                memory = psutil.virtual_memory()
+                
+                # Get process info
+                process_info = []
+                worker_processes = []
+                
+                for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
+                    try:
+                        # Track worker processes
+                        if "pii-worker" in proc.info['name'] or "python" in proc.info['name']:
+                            worker_processes.append(proc)
+                            
+                            # Only collect detailed info for top processes
+                            if proc.info['cpu_percent'] > 1.0:
+                                process_info.append(proc.info)
+                    except:
+                        continue
+                
+                # Sort process info by CPU usage
+                process_info.sort(key=lambda x: x['cpu_percent'], reverse=True)
+                
+                # Create status panel
+                content = f"[bold]System Performance:[/bold]\n"
+                content += f"CPU: {cpu_percent:.1f}% | Memory: {memory.percent:.1f}% ({memory.used/1024/1024/1024:.1f} GB)\n"
+                content += f"Workers running: {len(worker_processes)}/{worker_count}\n\n"
+                
+                if process_info:
+                    content += "[bold]Top Processes:[/bold]\n"
+                    for proc in process_info[:5]:  # Show top 5 processes
+                        content += f"PID {proc['pid']}: {proc['name']} - CPU: {proc['cpu_percent']:.1f}%, Mem: {proc['memory_percent']:.1f}%\n"
+                
+                live.update(Panel(content, title="Performance Monitor"))
+                
+                # Sleep briefly
+                time.sleep(1)
+    except Exception as e:
+        logger.error(f"Error in performance monitor: {e}")
+        return
 
 def export_to_json(db_path: str, output_path: str, job_id: Optional[int] = None):
     """
@@ -326,7 +612,7 @@ def export_to_json(db_path: str, output_path: str, job_id: Optional[int] = None)
         entity_table.add_column("Count", justify="right", style="green")
         
         for entity_type, count in sorted(job_stats.get('entity_types', {}).items(), 
-                                        key=lambda x: x[1], reverse=True):
+                                         key=lambda x: x[1], reverse=True):
             entity_table.add_row(entity_type, str(count))
         
         console.print(entity_table)
@@ -341,9 +627,6 @@ def export_to_json(db_path: str, output_path: str, job_id: Optional[int] = None)
     file_table.add_row("JSON File Size", f"{os.path.getsize(output_path) / (1024 * 1024):.2f} MB")
     
     console.print(file_table)
-    
-    # Close database
-    db.close()
 
 def list_jobs_for_directory(db_path: str, directory: str):
     """
@@ -357,7 +640,7 @@ def list_jobs_for_directory(db_path: str, directory: str):
     db = get_database(db_path)
     
     # Get jobs for directory
-    jobs = db.get_jobs_by_metadata('directory', directory)
+    jobs = db.get_jobs_for_directory(directory)
     
     if not jobs:
         console.print(f"[yellow]No jobs found for directory: {directory}[/yellow]")
@@ -370,7 +653,6 @@ def list_jobs_for_directory(db_path: str, directory: str):
     jobs_table.add_column("Start Time", style="blue")
     jobs_table.add_column("Status", style="magenta")
     jobs_table.add_column("Files", justify="right")
-    jobs_table.add_column("Progress", justify="right")
     
     for job in jobs:
         job_id = job['job_id']
@@ -380,439 +662,22 @@ def list_jobs_for_directory(db_path: str, directory: str):
             'running': 'blue',
             'interrupted': 'yellow',
             'error': 'red',
+            'unknown': 'magenta'
         }.get(status, 'white')
         
-        total_files = job.get('total_files', 0)
-        processed_files = job.get('processed_files', 0)
-        progress = f"{processed_files}/{total_files}"
-        progress_pct = f"{(processed_files / total_files * 100):.1f}%" if total_files > 0 else "0%"
+        total_files = db.get_file_count_for_job(job_id)
+        completed_files = db.get_completed_count_for_job(job_id)
         
         jobs_table.add_row(
             str(job_id),
             job.get('name', 'Unnamed'),
             job.get('start_time', 'unknown'),
             f"[{status_color}]{status}[/{status_color}]",
-            progress,
-            progress_pct
+            f"{completed_files}/{total_files}"
         )
     
     console.print(jobs_table)
     console.print("\nTo resume a specific job, use: --resume --job-id <JOB_ID>")
-
-def process_directory(args):
-    """
-    Process a directory of files with PII analysis
-    
-    Args:
-        args: Command-line arguments
-    """
-    # Connect to database
-    db = get_database(args.db_path)
-    
-    # Set up supported extensions
-    extensions = None
-    if args.extensions:
-        # Parse comma-separated extensions
-        extensions = set(ext.strip().lower() for ext in args.extensions.split(','))
-        # Add dot prefix if not present
-        extensions = {ext if ext.startswith('.') else f'.{ext}' for ext in extensions}
-        logger.info(f"Using custom extensions: {extensions}")
-    
-    # Reset database if requested
-    is_after_db_reset = False
-    if args.reset_db:
-        reset_database(args.db_path)
-        is_after_db_reset = True
-    
-    # Define callback for scan progress updates
-    def scan_progress_callback(state):
-        if state['type'] == 'scan_progress':
-            # Update every 100 files or every 0.5 seconds
-            elapsed = state.get('elapsed', 0)
-            total_files = state.get('total_files', 0)
-            new_files = state.get('new_files', 0)
-            current_file = state.get('current_file', '')
-            
-            # Format current file to show just the leaf name
-            current_basename = os.path.basename(current_file) if current_file else ''
-            
-            # Update the description
-            scan_progress.update(
-                scan_task, 
-                description=f"[cyan]Scanning directory... Found {total_files} files ({new_files} new) - {current_basename}"
-            )
-    
-    # Determine job ID based on command-line arguments
-    job_id = None
-    
-    # Force restart requested
-    if args.force_restart:
-        if args.directory is None:
-            logger.error("Directory is required for force restart")
-            return
-        
-        # Look for an existing job for this directory
-        existing_jobs = db.get_jobs_by_metadata('directory', args.directory)
-        
-        if existing_jobs and args.job_id is not None:
-            # Check if the requested job ID exists
-            job_exists = any(job['job_id'] == args.job_id for job in existing_jobs)
-            if job_exists:
-                job_id = args.job_id
-                logger.info(f"Force restarting job {job_id}")
-                
-                # Clear all files for the job
-                cleared_files = db.clear_files_for_job(job_id)
-                logger.info(f"Cleared {cleared_files} files for forced restart")
-            else:
-                logger.error(f"Job ID {args.job_id} not found for the specified directory")
-                return
-        elif existing_jobs:
-            # Use the most recent job
-            job_id = existing_jobs[0]['job_id']
-            logger.info(f"Force restarting job {job_id} (using most recent job)")
-            
-            # Clear all files for the job
-            cleared_files = db.clear_files_for_job(job_id)
-            logger.info(f"Cleared {cleared_files} files for forced restart")
-        else:
-            # No existing job, create new one
-            job_id = db.create_job(
-                name=f"PII Analysis - {os.path.basename(args.directory)}",
-                metadata={'directory': args.directory}
-            )
-            logger.info(f"Created new job {job_id} for force restart (no existing job found)")
-        
-        # Setup progress display for scanning
-        with Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(pulse_style="cyan"),
-            TimeElapsedColumn(),
-            console=console
-        ) as scan_progress:
-            # Create indeterminate progress task for scanning
-            scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
-            
-            # Scan directory with fresh slate
-            total, new = scan_directory(
-                args.directory,
-                db,
-                job_id,
-                supported_extensions=extensions,
-                progress_callback=scan_progress_callback,
-                verbose=args.verbose
-            )
-        
-        logger.info(f"Rescanned directory: found {total} files, registered {new} new files")
-    
-    # Check for resumable job
-    elif args.resume or is_after_db_reset:
-        # Look for an existing job for this directory
-        existing_jobs = db.get_jobs_by_metadata('directory', args.directory) if args.directory else []
-        
-        # If we have a specific job ID, check if it exists
-        if args.job_id is not None:
-            job = db.get_job(args.job_id)
-            if job:
-                job_id = args.job_id
-                logger.info(f"Using specified job ID: {job_id}")
-            else:
-                logger.error(f"Job ID {args.job_id} not found")
-                return
-        elif existing_jobs:
-            # Multiple jobs for the same directory - ask user to select if more than one
-            if len(existing_jobs) > 1 and not is_after_db_reset:
-                console.print(f"[yellow]Found {len(existing_jobs)} jobs for directory: {args.directory}[/yellow]")
-                
-                # Create table for jobs
-                jobs_table = Table(title="Available Jobs", show_header=True, header_style="bold")
-                jobs_table.add_column("Job ID", style="cyan", justify="right")
-                jobs_table.add_column("Name", style="green")
-                jobs_table.add_column("Start Time", style="blue")
-                jobs_table.add_column("Status", style="magenta")
-                jobs_table.add_column("Files", justify="right")
-                jobs_table.add_column("Progress", justify="right")
-                
-                for job in existing_jobs:
-                    job_id = job['job_id']
-                    status = job.get('status', 'unknown')
-                    status_color = {
-                        'completed': 'green',
-                        'running': 'blue',
-                        'interrupted': 'yellow',
-                        'error': 'red',
-                    }.get(status, 'white')
-                    
-                    total_files = job.get('total_files', 0)
-                    processed_files = job.get('processed_files', 0)
-                    progress = f"{processed_files}/{total_files}"
-                    progress_pct = f"{(processed_files / total_files * 100):.1f}%" if total_files > 0 else "0%"
-                    
-                    jobs_table.add_row(
-                        str(job_id),
-                        job.get('name', 'Unnamed'),
-                        job.get('start_time', 'unknown'),
-                        f"[{status_color}]{status}[/{status_color}]",
-                        progress,
-                        progress_pct
-                    )
-                
-                console.print(jobs_table)
-                
-                # Ask user to select a job
-                job_id_str = Prompt.ask(
-                    "Enter job ID to resume",
-                    default=str(existing_jobs[0]['job_id']),
-                    choices=[str(job['job_id']) for job in existing_jobs]
-                )
-                job_id = int(job_id_str)
-                logger.info(f"Selected job ID: {job_id}")
-            else:
-                # Use the first job
-                job_id = existing_jobs[0]['job_id']
-                logger.info(f"Using existing job {job_id}")
-        else:
-            # No existing jobs found, create a new one if we have a directory
-            if args.directory:
-                job_id = db.create_job(
-                    name=f"PII Analysis - {os.path.basename(args.directory)}",
-                    metadata={'directory': args.directory}
-                )
-                logger.info(f"Created new job {job_id} (no existing jobs found)")
-            else:
-                logger.error("Directory is required when no existing jobs are found")
-                return
-        
-        # Now that we have a job ID, continue with processing
-        if is_after_db_reset:
-            logger.info(f"Using job {job_id} after database reset")
-            
-            # Setup progress display for scanning
-            with Progress(
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(pulse_style="cyan"),
-                TimeElapsedColumn(),
-                console=console
-            ) as scan_progress:
-                # Create indeterminate progress task for scanning
-                scan_task = scan_progress.add_task("[cyan]Scanning directory after reset...", total=None)
-                
-                # We need the directory for scanning
-                job = db.get_job(job_id)
-                if job and job.get('metadata', {}).get('directory'):
-                    directory = job['metadata']['directory']
-                    
-                    # Scan directory but skip registration after DB reset
-                    total, new = scan_directory(
-                        directory,
-                        db,
-                        job_id,
-                        supported_extensions=extensions,
-                        skip_registration=True,  # Skip registration since files are already in DB
-                        progress_callback=scan_progress_callback,
-                        verbose=args.verbose
-                    )
-                else:
-                    logger.error(f"Job {job_id} does not have directory metadata")
-                    logger.error("Please specify a directory with --directory")
-                    return
-        elif args.directory:
-            # For normal resume with directory, rescan to find any new files
-            # Skip scanning if --skip-scan option is provided
-            if not args.skip_scan:
-                # Setup progress display for scanning
-                with Progress(
-                    TextColumn("[progress.description]{task.description}"),
-                    BarColumn(pulse_style="cyan"),
-                    TimeElapsedColumn(),
-                    console=console
-                ) as scan_progress:
-                    # Create indeterminate progress task for scanning
-                    scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
-                    
-                    # Rescan to find any new files since last run
-                    total, new = scan_directory(
-                        args.directory,
-                        db,
-                        job_id,
-                        supported_extensions=extensions,
-                        progress_callback=scan_progress_callback,
-                        verbose=args.verbose
-                    )
-                
-                logger.info(f"Scanned directory: found {total} files, registered {new} new files")
-            else:
-                logger.info("Skipping directory scan as requested with --skip-scan")
-        
-        # Find resumption point for this job
-        resumption = find_resumption_point(db, job_id)
-        
-        if resumption['status'] == 'completed':
-            console.print(f"[bold green]Job {job_id} is already completed.[/bold green]")
-            console.print(f"Processed {resumption['completed_files']} files, {resumption['error_files']} errors")
-            show_status(args.db_path, job_id)
-            return
-        elif resumption['status'] == 'resumable':
-            logger.info(f"Resuming job {job_id}: {resumption['message']}")
-            # Reset any stalled files to pending (from crash/interrupt)
-            reset_count = reset_stalled_files(db, job_id)
-            if reset_count > 0:
-                logger.info(f"Reset {reset_count} stalled files to 'pending' status")
-        else:
-            console.print(f"[bold yellow]Job {job_id} cannot be resumed: {resumption['message']}[/bold yellow]")
-            return
-    
-    # Create a new job if not resuming or force-restarting
-    else:
-        if not args.directory:
-            logger.error("Directory argument is required for scanning")
-            return
-            
-        job_id = db.create_job(
-            command_line=' '.join(sys.argv),
-            name=f"PII Analysis - {os.path.basename(args.directory)}",
-            metadata={'directory': args.directory}
-        )
-        logger.info(f"Created new job {job_id}")
-        
-        # Setup progress display for scanning
-        with Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(pulse_style="cyan"),
-            TimeElapsedColumn(),
-            console=console
-        ) as scan_progress:
-            # Create indeterminate progress task for scanning
-            scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
-            
-            # Scan directory
-            total, new = scan_directory(
-                args.directory,
-                db,
-                job_id,
-                supported_extensions=extensions,
-                max_files=args.max_files,
-                progress_callback=scan_progress_callback,
-                verbose=args.verbose
-            )
-        
-        logger.info(f"Scanned directory: found {total} files, registered {new} new files")
-    
-    # Update job status to running
-    db.update_job_status(job_id, 'running')
-    
-    # Get job information for progress bar
-    job_info = db.get_job(job_id)
-    total_files = job_info.get('total_files', 0)
-    pending_files = find_resumption_point(db, job_id).get('pending_files', 0)
-    
-    # Process files
-    if args.verbose:
-        logger.info(f"Starting processing with {args.workers or 'auto'} workers, batch size {args.batch_size}")
-        
-        try:
-            # Replace mock_process_file with actual PII processing function
-            stats = process_files_parallel(
-                db,
-                job_id,
-                analyze_file,
-                max_workers=args.workers,
-                batch_size=args.batch_size,
-                max_files=args.max_files,
-                settings={
-                    'threshold': args.threshold,
-                    'entities': args.entities,
-                    'force_ocr': args.ocr,
-                    'ocr_dpi': args.ocr_dpi,
-                    'ocr_threads': args.ocr_threads,
-                    'max_pages': args.max_pages,
-                    'debug': args.debug
-                }
-            )
-            
-            # Show results
-            logger.info(f"Processing complete: processed {stats['total_processed']} files in {stats['elapsed_time']:.2f}s")
-            logger.info(f"Processing rate: {stats['files_per_second']:.2f} files/sec")
-            
-            # Show job statistics
-            if args.verbose:
-                show_status(args.db_path, job_id)
-        
-        except KeyboardInterrupt:
-            logger.info("Processing interrupted by user")
-            db.update_job_status(job_id, 'interrupted')
-    else:
-        # Use Rich progress display when not in verbose mode
-        console.print(f"[bold]Processing [cyan]{args.directory}[/cyan] with {args.workers or 'auto'} workers[/bold]")
-        console.print(f"Found {total_files} files, {pending_files} pending to process")
-        
-        # Create tracking variables for progress
-        processed_count = 0
-        error_count = 0
-        
-        # Process with Rich progress bar
-        try:
-            with Progress(
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeElapsedColumn(),
-                TimeRemainingColumn(),
-                console=console
-            ) as progress:
-                # Create task for overall progress
-                task = progress.add_task("[green]Processing files...", total=pending_files)
-                
-                # Custom callback to update progress
-                def progress_callback(state):
-                    nonlocal processed_count, error_count
-                    
-                    if state.get('type') == 'file_completed':
-                        processed_count += 1
-                        progress.update(task, completed=processed_count, 
-                                       description=f"[green]Processed: [cyan]{processed_count}[/cyan] files")
-                    elif state.get('type') == 'file_error':
-                        error_count += 1
-                        # Don't update progress bar for errors
-                
-                # Process files with progress callback
-                stats = process_files_parallel(
-                    db,
-                    job_id,
-                    analyze_file,
-                    max_workers=args.workers,
-                    batch_size=args.batch_size,
-                    max_files=args.max_files,
-                    settings={
-                        'threshold': args.threshold,
-                        'entities': args.entities,
-                        'force_ocr': args.ocr,
-                        'ocr_dpi': args.ocr_dpi,
-                        'ocr_threads': args.ocr_threads,
-                        'max_pages': args.max_pages,
-                        'debug': args.debug
-                    },
-                    progress_callback=progress_callback
-                )
-            
-            # Show summary after completion
-            console.print(f"\n[bold green]Processing complete![/bold green]")
-            console.print(f"Processed {stats['total_processed']} files in {stats['elapsed_time']:.2f}s")
-            console.print(f"Processing rate: {stats['files_per_second']:.2f} files/sec")
-            
-            # Show entity counts
-            job_stats = db.get_job_statistics(job_id)
-            if job_stats.get('entity_types'):
-                console.print("\n[bold]PII Entities Found:[/bold]")
-                for entity_type, count in job_stats.get('entity_types', {}).items():
-                    console.print(f"  {entity_type}: {count}")
-        
-        except KeyboardInterrupt:
-            console.print("\n[bold red]Processing interrupted by user[/bold red]")
-            db.update_job_status(job_id, 'interrupted')
-    
-    # Close database
-    db.close()
 
 def follow_process(pid_or_timestamp: str):
     """
@@ -821,200 +686,22 @@ def follow_process(pid_or_timestamp: str):
     Args:
         pid_or_timestamp: Process ID or timestamp of the process to follow
     """
-    # Check if input looks like a timestamp (YYYYMMDD-HHMMSS)
-    timestamp_pattern = re.compile(r'^\d{8}-\d{6}$')
-    is_timestamp = bool(timestamp_pattern.match(pid_or_timestamp))
-    
-    # Path to logs directory
-    logs_dir = os.path.join(os.getcwd(), "logs")
-    
-    # Find the log file
-    log_file = None
-    
-    if is_timestamp:
-        # If timestamp, look for matching log file
-        log_pattern = os.path.join(logs_dir, f"pii_analysis_{pid_or_timestamp}.log")
-        matching_logs = glob.glob(log_pattern)
-        
-        if matching_logs:
-            log_file = matching_logs[0]
-        else:
-            console.print(f"[bold red]Error:[/bold red] No log file found for timestamp {pid_or_timestamp}")
-            return
-    else:
-        # Assume it's a PID, look for corresponding timestamp
-        timestamp_file = os.path.join(logs_dir, f"{pid_or_timestamp}.timestamp")
-        
-        if os.path.exists(timestamp_file):
-            # Read timestamp from file
-            with open(timestamp_file) as f:
-                timestamp = f.read().strip()
-            
-            # Use timestamp to find log file
-            log_file = os.path.join(logs_dir, f"pii_analysis_{timestamp}.log")
-            
-            if not os.path.exists(log_file):
-                console.print(f"[bold red]Error:[/bold red] Log file for PID {pid_or_timestamp} not found")
-                return
-        else:
-            # No timestamp file, search for any PID file with this PID
-            pid_files = glob.glob(os.path.join(logs_dir, "*.pid"))
-            for pid_file in pid_files:
-                with open(pid_file) as f:
-                    file_pid = f.read().strip()
-                    if file_pid == pid_or_timestamp:
-                        # Extract timestamp from filename
-                        filename = os.path.basename(pid_file)
-                        match = re.search(r'pii_analysis_(\d{8}-\d{6})\.pid', filename)
-                        if match:
-                            timestamp = match.group(1)
-                            log_file = os.path.join(logs_dir, f"pii_analysis_{timestamp}.log")
-                            break
-            
-            if not log_file:
-                console.print(f"[bold red]Error:[/bold red] No log file found for PID {pid_or_timestamp}")
-                return
-    
-    # Check if process is still running
-    process_running = False
-    
-    # Try to find PID from timestamp if we started with timestamp
-    if is_timestamp:
-        pid_file = os.path.join(logs_dir, f"pii_analysis_{pid_or_timestamp}.pid")
-        if os.path.exists(pid_file):
-            with open(pid_file) as f:
-                pid = f.read().strip()
-                # Check if process is still running
-                import subprocess
-                try:
-                    result = subprocess.run(["ps", "-p", pid], capture_output=True, text=True)
-                    process_running = result.returncode == 0
-                except Exception:
-                    process_running = False
-    # If we have a PID directly
-    else:
-        import subprocess
-        try:
-            result = subprocess.run(["ps", "-p", pid_or_timestamp], capture_output=True, text=True)
-            process_running = result.returncode == 0
-        except Exception:
-            process_running = False
-    
-    # Show log file contents with follow
-    import subprocess
-    
-    console.print(f"Following log file: [cyan]{log_file}[/cyan]")
-    if process_running:
-        console.print("[green]Process is still running[/green]")
-    else:
-        console.print("[yellow]Process is not running (showing completed log)[/yellow]")
-    
-    try:
-        # Use the tail command to follow log file
-        cmd = ["tail", "-f" if process_running else "-n", "1000" if not process_running else "", log_file]
-        cmd = [c for c in cmd if c]  # Remove empty strings
-        
-        console.print("\n[bold]--- Log output below ---[/bold]\n")
-        process = subprocess.Popen(cmd)
-        
-        # If process is running, handle keyboard interrupt to stop following
-        if process_running:
-            try:
-                process.wait()
-            except KeyboardInterrupt:
-                console.print("\n[bold]Stopped following log[/bold]")
-                process.terminate()
-        else:
-            # For completed logs, just wait for tail to finish
-            process.wait()
-            
-    except Exception as e:
-        console.print(f"[bold red]Error following log:[/bold red] {str(e)}")
+    console.print(f"[yellow]Follow process feature is not implemented in this version.[/yellow]")
 
 def list_detached_processes():
     """
     List all detached PII analysis processes
     """
-    import subprocess
+    console.print(f"[yellow]Detached processes feature is not implemented in this version.[/yellow]")
+
+def detach_process(args):
+    """
+    Detach the current process to run in the background
     
-    # Path to logs directory
-    logs_dir = os.path.join(os.getcwd(), "logs")
-    
-    # Make sure logs directory exists
-    if not os.path.exists(logs_dir):
-        console.print("[yellow]No detached processes found (logs directory doesn't exist)[/yellow]")
-        return
-    
-    # Find all PID files
-    pid_files = glob.glob(os.path.join(logs_dir, "*.pid"))
-    if not pid_files:
-        console.print("[yellow]No detached processes found[/yellow]")
-        return
-    
-    # Create a table for display
-    from rich.table import Table
-    table = Table(title="Detached PII Analysis Processes", show_header=True, header_style="bold")
-    table.add_column("PID", style="cyan")
-    table.add_column("Timestamp", style="green")
-    table.add_column("Log File", style="blue")
-    table.add_column("Status", style="yellow")
-    table.add_column("Runtime", style="magenta")
-    
-    # Check each PID file
-    for pid_file in sorted(pid_files, reverse=True):
-        filename = os.path.basename(pid_file)
-        match = re.search(r'pii_analysis_(\d{8}-\d{6})\.pid', filename)
-        if match:
-            timestamp = match.group(1)
-            
-            # Read PID
-            with open(pid_file) as f:
-                pid = f.read().strip()
-            
-            # Check if process is running
-            try:
-                result = subprocess.run(["ps", "-p", pid], capture_output=True, text=True)
-                is_running = result.returncode == 0
-            except Exception:
-                is_running = False
-            
-            # Get log file
-            log_file = os.path.join(logs_dir, f"pii_analysis_{timestamp}.log")
-            log_file_short = os.path.basename(log_file) if os.path.exists(log_file) else "Log not found"
-            
-            # Calculate runtime
-            import datetime
-            try:
-                start_time = datetime.datetime.strptime(timestamp, "%Y%m%d-%H%M%S")
-                if is_running:
-                    runtime = str(datetime.datetime.now() - start_time).split('.')[0]  # Remove microseconds
-                else:
-                    # Try to get last modified time of log file
-                    if os.path.exists(log_file):
-                        end_time = datetime.datetime.fromtimestamp(os.path.getmtime(log_file))
-                        runtime = str(end_time - start_time).split('.')[0]  # Remove microseconds
-                    else:
-                        runtime = "Unknown"
-            except Exception:
-                runtime = "Unknown"
-            
-            # Add to table
-            table.add_row(
-                pid,
-                timestamp,
-                log_file_short,
-                "[green]Running[/green]" if is_running else "[red]Stopped[/red]",
-                runtime
-            )
-    
-    # Display table
-    console.print(table)
-    
-    # Show instructions
-    console.print("\nTo follow a process, use:")
-    console.print("[dim]  python src/process_files.py --follow <pid>[/dim]")
-    console.print("or")
-    console.print("[dim]  python src/process_files.py --follow <timestamp>[/dim]")
+    Args:
+        args: Command line arguments
+    """
+    console.print(f"[yellow]Detach process feature is not implemented in this version.[/yellow]")
 
 def reset_database(db_path: str):
     """
@@ -1033,13 +720,6 @@ def reset_database(db_path: str):
         # Display results
         console.print(f"[bold green]Database Reset Complete[/bold green]")
         console.print(f"Reset {reset_count} files to pending status")
-        console.print("All entity data and results have been cleared")
-        console.print("All job counters have been reset to 0")
-        console.print("\nYou can now process the files again with:")
-        console.print(f"[dim]  python src/process_files.py /path/to/directory --db-path {db_path}[/dim]")
-        
-        # Close database
-        db.close()
         
         return reset_count
         
@@ -1048,53 +728,70 @@ def reset_database(db_path: str):
         return 0
 
 def main():
-    """Main entry point"""
+    """Main entry point for the application"""
+    # Parse command-line arguments
     args = parse_args()
     
-    # Set up logging level
+    # Set logging level based on verbosity
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
-        logger.debug("Debug mode enabled")
+    elif args.verbose:
+        logging.getLogger().setLevel(logging.INFO)
+    else:
+        logging.getLogger().setLevel(logging.WARNING)
     
-    # Handle --list-jobs
-    if args.list_jobs:
-        list_jobs_for_directory(args.db_path, args.list_jobs)
-        return
+    try:
+        # Apply database reset if requested
+        if args.reset_db:
+            reset_database(args.db_path)
+            console.print(f"[green]Database reset completed for {args.db_path}[/green]")
+            return
+        
+        # Show job status if requested
+        if args.status:
+            show_status(args.db_path, args.job_id)
+            return
+        
+        # Export results if requested
+        if args.export:
+            export_to_json(args.db_path, args.export, args.job_id)
+            return
+        
+        # List jobs for directory if requested
+        if args.list_jobs:
+            list_jobs_for_directory(args.db_path, args.list_jobs)
+            return
+        
+        # List detached processes if requested
+        if args.list_detached:
+            list_detached_processes()
+            return
+        
+        # Follow detached process if requested
+        if args.follow:
+            follow_process(args.follow)
+            return
+        
+        # Run in detached mode if requested
+        if args.detach:
+            detach_process(args)
+            return
+        
+        # Process directory
+        if args.directory:
+            process_directory(args)
+        else:
+            console.print("[bold red]Error:[/bold red] No operation specified")
+            console.print("Use --help for usage information")
     
-    # Handle --status
-    if args.status:
-        show_status(args.db_path, args.job_id)
-        return
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {str(e)}")
+        if args.debug:
+            import traceback
+            console.print(traceback.format_exc())
+        return 1
     
-    # Handle --export
-    if args.export:
-        export_to_json(args.db_path, args.export, args.job_id)
-        return
-    
-    # Handle --list-detached
-    if args.list_detached:
-        list_detached_processes()
-        return
-    
-    # Handle --follow
-    if args.follow:
-        follow_process(args.follow)
-        return
-    
-    # Check if we have a directory or specific options
-    if not args.directory and not args.reset_db and not args.resume:
-        print("Error: directory argument is required unless using --status, --export, --reset-db, --list-jobs, or --resume with --job-id")
-        return
-    
-    # Handle --detach
-    if args.detach:
-        # Start a detached process
-        from src.utils.process_utils import start_detached_process
-        start_detached_process(sys.argv)
-        return
-    
-    # Process directory
-    process_directory(args)
+    return 0
 
 if __name__ == "__main__":
-    main() 
+    sys.exit(main()) 
