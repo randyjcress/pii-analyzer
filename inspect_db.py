@@ -8,9 +8,10 @@ import os
 import sqlite3
 import json
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import defaultdict
 
-def inspect_database(db_path):
+def inspect_database(db_path, show_processing_speed=False, time_window=30):
     """Inspect database and print relevant information"""
     if not os.path.exists(db_path):
         print(f"Error: Database file {db_path} not found")
@@ -96,16 +97,133 @@ def inspect_database(db_path):
         if job_ids:
             for job_id in job_ids:
                 print(f"sqlite3 {db_path} \"INSERT INTO job_metadata (job_id, key, value) VALUES ({job_id}, 'directory', '/CoWS/');\"")
-        
+    
+    # Processing speed statistics
+    if show_processing_speed:
+        print("\n=== PROCESSING SPEED STATISTICS ===")
+        for job in jobs:
+            job_id = job['job_id']
+            print(f"Job ID: {job_id}")
+            
+            # Get completed files with processing times
+            cursor.execute("""
+            SELECT f.file_id, f.file_path, f.file_size, f.process_start, f.process_end, 
+                   r.processing_time, r.entity_count
+            FROM files f
+            LEFT JOIN results r ON f.file_id = r.file_id
+            WHERE f.job_id = ? AND f.status = 'completed' AND f.process_end IS NOT NULL
+            ORDER BY f.process_end DESC
+            """, (job_id,))
+            
+            completed_files = cursor.fetchall()
+            
+            if not completed_files:
+                print("  No completed files found with timing information")
+                continue
+                
+            # Statistics for the last window minutes
+            now = datetime.now()
+            window_start = now - timedelta(minutes=time_window)
+            
+            # Track files processed by time intervals
+            files_by_minute = defaultdict(int)
+            files_by_hour = defaultdict(int)
+            processing_times = []
+            file_sizes = []
+            file_types = defaultdict(int)
+            entity_counts = []
+            
+            # Recent files (within time window)
+            recent_files = []
+            recent_processing_times = []
+            
+            for file in completed_files:
+                # Extract processing time
+                proc_time = file['processing_time'] if file['processing_time'] else 0
+                processing_times.append(proc_time)
+                
+                # Get file size
+                file_size = file['file_size'] if file['file_size'] else 0
+                file_sizes.append(file_size)
+                
+                # Get entity count if available
+                if file['entity_count']:
+                    entity_counts.append(file['entity_count'])
+                
+                # Get file extension for type stats
+                file_path = file['file_path']
+                file_ext = os.path.splitext(file_path)[1].lower()
+                file_types[file_ext] += 1
+                
+                # Process time-based statistics
+                if file['process_end'] and isinstance(file['process_end'], datetime):
+                    # Add to minute & hour counters
+                    minute_key = file['process_end'].strftime("%Y-%m-%d %H:%M")
+                    hour_key = file['process_end'].strftime("%Y-%m-%d %H")
+                    
+                    files_by_minute[minute_key] += 1
+                    files_by_hour[hour_key] += 1
+                    
+                    # Check if within time window
+                    if file['process_end'] >= window_start:
+                        recent_files.append(file)
+                        recent_processing_times.append(proc_time)
+            
+            # Calculate statistics
+            if processing_times:
+                avg_processing_time = sum(processing_times) / len(processing_times)
+                max_processing_time = max(processing_times)
+                min_processing_time = min(processing_times)
+                
+                print(f"  Overall Processing Statistics:")
+                print(f"    Total files processed: {len(completed_files)}")
+                print(f"    Average processing time: {avg_processing_time:.2f} seconds")
+                print(f"    Min/Max processing time: {min_processing_time:.2f}s / {max_processing_time:.2f}s")
+                
+                if file_sizes:
+                    avg_file_size = sum(file_sizes) / len(file_sizes)
+                    print(f"    Average file size: {avg_file_size:.2f} bytes")
+                
+                if entity_counts:
+                    avg_entities = sum(entity_counts) / len(entity_counts)
+                    max_entities = max(entity_counts)
+                    print(f"    Average entities per file: {avg_entities:.2f}")
+                    print(f"    Maximum entities in a file: {max_entities}")
+            
+            # Recent processing statistics
+            if recent_files:
+                print(f"\n  Last {time_window} minutes:")
+                print(f"    Files processed: {len(recent_files)}")
+                files_per_hour = (len(recent_files) / time_window) * 60
+                print(f"    Processing rate: {files_per_hour:.2f} files/hour")
+                
+                if recent_processing_times:
+                    avg_recent_time = sum(recent_processing_times) / len(recent_processing_times)
+                    print(f"    Average recent processing time: {avg_recent_time:.2f} seconds")
+            
+            # Show hourly processing rates for the last 24 hours
+            print("\n  Hourly processing rates:")
+            if files_by_hour:
+                # Sort hours and get the last 24
+                sorted_hours = sorted(files_by_hour.items())[-24:]
+                for hour, count in sorted_hours:
+                    print(f"    {hour}: {count} files ({count/1.0:.2f} files/hour)")
+            else:
+                print("    No hourly data available")
+    
     conn.close()
 
 def main():
     parser = argparse.ArgumentParser(description="Inspect PII Analyzer database")
     parser.add_argument('--db-path', type=str, default='pii_results.db',
                       help='Path to database file')
+    parser.add_argument('--show-speed', action='store_true',
+                      help='Show processing speed statistics')
+    parser.add_argument('--time-window', type=int, default=30,
+                      help='Time window in minutes for recent statistics (default: 30)')
     args = parser.parse_args()
     
-    inspect_database(args.db_path)
+    inspect_database(args.db_path, args.show_speed, args.time_window)
 
 if __name__ == "__main__":
     main() 
