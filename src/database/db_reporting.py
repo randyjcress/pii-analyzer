@@ -92,6 +92,9 @@ def get_processing_time_stats(db_path: str, job_id: Optional[int] = None) -> Dic
     Returns:
         Dictionary with processing time statistics and estimates
     """
+    # Debug logging
+    print("DEBUG: Entering get_processing_time_stats function")
+    
     # Connect to database
     db = get_database(db_path)
     
@@ -99,6 +102,7 @@ def get_processing_time_stats(db_path: str, job_id: Optional[int] = None) -> Dic
     if job_id is None:
         jobs = db.get_all_jobs()
         if not jobs:
+            print("DEBUG: No jobs found")
             return {
                 'elapsed_time_seconds': 0,
                 'elapsed_time_formatted': "0:00:00",
@@ -107,10 +111,12 @@ def get_processing_time_stats(db_path: str, job_id: Optional[int] = None) -> Dic
                 'estimated_completion_hours': 0
             }
         job_id = jobs[0]['job_id']  # Get most recent job
+        print(f"DEBUG: Using most recent job_id: {job_id}, type: {type(job_id)}")
     
     # Get job information
     job = db.get_job(job_id)
     if not job:
+        print(f"DEBUG: No job found for job_id: {job_id}")
         return {
             'elapsed_time_seconds': 0,
             'elapsed_time_formatted': "0:00:00",
@@ -121,12 +127,25 @@ def get_processing_time_stats(db_path: str, job_id: Optional[int] = None) -> Dic
         
     # Get processing stats
     processing_stats = get_file_processing_stats(db_path, job_id)
-    completed_files = int(processing_stats['completed'])
-    pending_files = int(processing_stats['pending'])
+    print(f"DEBUG: processing_stats: {processing_stats}")
+    for key, value in processing_stats.items():
+        print(f"DEBUG: {key} = {value}, type: {type(value)}")
+    
+    try:
+        completed_files = int(processing_stats['completed'])
+        pending_files = int(processing_stats['pending'])
+        print(f"DEBUG: converted completed_files: {completed_files}, type: {type(completed_files)}")
+        print(f"DEBUG: converted pending_files: {pending_files}, type: {type(pending_files)}")
+    except Exception as e:
+        print(f"DEBUG: Error converting processing stats: {e}")
+        completed_files = 0
+        pending_files = 0
     
     # Calculate elapsed time
     start_time_str = job.get('start_time')
     last_update_str = job.get('last_updated')
+    print(f"DEBUG: start_time_str: {start_time_str}, type: {type(start_time_str)}")
+    print(f"DEBUG: last_update_str: {last_update_str}, type: {type(last_update_str)}")
     
     if not start_time_str:
         return {
