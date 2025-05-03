@@ -256,8 +256,34 @@ def find_resumption_point(
     if job_id:
         # Check specific job
         job = db.get_job(job_id)
-        if job and job.get('directory') == directory:
-            return job_id, job
+        
+        if not job:
+            return None, None
+            
+        # Get directory from metadata
+        job_directory = None
+        metadata = db.get_job_metadata(job_id, 'directory')
+        if metadata:
+            job_directory = metadata
+            
+        # Also check if directory is directly in job record (for backward compatibility)
+        if 'directory' in job:
+            job_directory = job['directory']
+            
+        # Compare normalized paths to avoid trivial mismatches
+        if job_directory:
+            # Normalize both paths for comparison
+            norm_job_dir = os.path.normpath(job_directory)
+            norm_dir = os.path.normpath(directory)
+            
+            # Check if paths match
+            if norm_job_dir == norm_dir:
+                # Add directory to job for later use
+                job['directory'] = job_directory
+                return job_id, job
+                
+        # If we get here, the job exists but directory doesn't match
+        logger.warning(f"Job {job_id} exists but directory '{job_directory}' doesn't match '{directory}'")
         return None, None
     
     # Find jobs for this directory

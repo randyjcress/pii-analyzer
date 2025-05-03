@@ -1388,6 +1388,30 @@ class PIIDatabase:
             logger.error(f"Error creating job for directory {directory}: {e}")
             raise
 
+    def get_job_metadata(self, job_id: int, key: str) -> Optional[str]:
+        """
+        Get a specific metadata value for a job.
+        
+        Args:
+            job_id: Job ID to get metadata for
+            key: Metadata key to retrieve
+            
+        Returns:
+            Metadata value or None if not found
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+            SELECT value FROM job_metadata
+            WHERE job_id = ? AND key = ?
+            """, (job_id, key))
+            
+            result = cursor.fetchone()
+            return result['value'] if result else None
+        except sqlite3.Error as e:
+            logger.error(f"Error getting metadata {key} for job {job_id}: {e}")
+            return None
+
 
 # Factory function to get a database instance
 def get_database(db_path: str = 'pii_analysis.db') -> PIIDatabase:
