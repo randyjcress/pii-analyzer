@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger('pii_database')
 
 # Schema version for future upgrades
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 class PIIDatabase:
     """Manages SQLite database operations for the PII Analyzer."""
@@ -37,7 +37,7 @@ class PIIDatabase:
         exists = os.path.exists(self.db_path)
         try:
             # Connect with foreign key support
-            self.conn = sqlite3.connect(self.db_path)
+            self.conn = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
             self.conn.execute("PRAGMA foreign_keys = ON")
             self.conn.row_factory = sqlite3.Row
             
@@ -98,7 +98,7 @@ class PIIDatabase:
                 CREATE TABLE files (
                     file_id INTEGER PRIMARY KEY,
                     job_id INTEGER,
-                    file_path TEXT UNIQUE,
+                    file_path TEXT,
                     file_size INTEGER,
                     file_type TEXT,
                     modified_time TIMESTAMP,
@@ -106,7 +106,8 @@ class PIIDatabase:
                     error_message TEXT,
                     process_start TIMESTAMP,
                     process_end TIMESTAMP,
-                    FOREIGN KEY (job_id) REFERENCES jobs(job_id)
+                    FOREIGN KEY (job_id) REFERENCES jobs(job_id),
+                    UNIQUE (job_id, file_path)
                 )
                 """)
                 
@@ -190,10 +191,49 @@ class PIIDatabase:
         Args:
             current_version: Current schema version
         """
-        # Placeholder for future schema upgrades
-        # Example: if current_version == 1: 
-        #             upgrade from 1 to 2...
-        pass
+        with self.conn:
+            cursor = self.conn.cursor()
+            
+            if current_version == 1 and SCHEMA_VERSION >= 2:
+                logger.info("Upgrading schema from version 1 to 2")
+                
+                # Create a new files table with the correct constraints
+                cursor.execute("""
+                CREATE TABLE files_new (
+                    file_id INTEGER PRIMARY KEY,
+                    job_id INTEGER,
+                    file_path TEXT,
+                    file_size INTEGER,
+                    file_type TEXT,
+                    modified_time TIMESTAMP,
+                    status TEXT DEFAULT 'pending',
+                    error_message TEXT,
+                    process_start TIMESTAMP,
+                    process_end TIMESTAMP,
+                    FOREIGN KEY (job_id) REFERENCES jobs(job_id),
+                    UNIQUE (job_id, file_path)
+                )
+                """)
+                
+                # Copy data from old table
+                cursor.execute("""
+                INSERT INTO files_new 
+                SELECT * FROM files
+                """)
+                
+                # Drop old table and rename new one
+                cursor.execute("DROP TABLE files")
+                cursor.execute("ALTER TABLE files_new RENAME TO files")
+                
+                # Recreate indexes
+                cursor.execute("CREATE INDEX idx_files_status ON files(status)")
+                cursor.execute("CREATE INDEX idx_files_job_id ON files(job_id)")
+                
+                # Update schema version
+                cursor.execute("UPDATE metadata SET value = ? WHERE key = 'schema_version'", 
+                            (str(SCHEMA_VERSION),))
+                
+                logger.info("Schema upgrade to version 2 completed successfully")
     
     def close(self):
         """Close the database connection."""
@@ -225,7 +265,7 @@ class PIIDatabase:
             ID of the new job
         """
         try:
-            now = datetime.now().isoformat()
+            now = datetime.now()  # Use datetime object directly, not string
             
             # Ensure metadata is a dictionary
             if metadata is None:
@@ -263,49 +303,49 @@ class PIIDatabase:
                         """, (job_id, 'directory', directory))
                 
                 logger.info(f"Created new job with ID {job_id}")
-                
                 return job_id
         except sqlite3.Error as e:
             logger.error(f"Error creating job: {e}")
-            raise
+            return -1
     
     def update_job_status(self, job_id: int, status: str, 
                           processed_files: Optional[int] = None, 
                           error_files: Optional[int] = None) -> bool:
         """
-        Update job status and counters.
+        Update job status and counters
         
         Args:
             job_id: ID of the job to update
-            status: New status ('running', 'completed', 'interrupted', 'error')
-            processed_files: Number of processed files (if known)
-            error_files: Number of error files (if known)
+            status: New status value
+            processed_files: Number of processed files (None to keep current)
+            error_files: Number of error files (None to keep current)
             
         Returns:
             bool: Success of the operation
         """
         try:
-            now = datetime.now()
             with self.conn:
-                cursor = self.conn.cursor()
+                # Build update SQL dynamically based on which values are provided
+                sql = "UPDATE jobs SET status = ?, last_updated = ?"
+                params = [status, datetime.now()]
                 
-                # Build update parameters
-                update_params = {"last_updated": now, "status": status}
                 if processed_files is not None:
-                    update_params["processed_files"] = processed_files
+                    sql += ", processed_files = ?"
+                    params.append(processed_files)
+                
                 if error_files is not None:
-                    update_params["error_files"] = error_files
+                    sql += ", error_files = ?"
+                    params.append(error_files)
                 
-                # Build SQL query
-                fields = ", ".join([f"{k} = ?" for k in update_params.keys()])
-                values = list(update_params.values())
-                values.append(job_id)
+                sql += " WHERE job_id = ?"
+                params.append(job_id)
                 
-                cursor.execute(f"UPDATE jobs SET {fields} WHERE job_id = ?", values)
+                # Execute update
+                self.conn.execute(sql, params)
                 
-                return cursor.rowcount > 0
+                return self.conn.total_changes > 0
         except sqlite3.Error as e:
-            logger.error(f"Error updating job {job_id}: {e}")
+            logger.error(f"Error updating job status: {e}")
             return False
     
     def get_latest_job(self) -> Optional[Dict[str, Any]]:
