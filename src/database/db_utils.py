@@ -170,6 +170,15 @@ class PIIDatabase:
                 self._upgrade_schema(version)
             elif version > SCHEMA_VERSION:
                 logger.warning(f"Database schema version ({version}) is newer than expected ({SCHEMA_VERSION})")
+
+            # Check if results table has metadata column
+            cursor.execute("PRAGMA table_info(results)")
+            columns = [row['name'] for row in cursor.fetchall()]
+            if 'metadata' not in columns:
+                logger.info("Adding metadata column to results table")
+                cursor.execute("ALTER TABLE results ADD COLUMN metadata TEXT")
+                self.conn.commit()
+                
         except Exception as e:
             logger.error(f"Schema verification error: {e}")
             raise
@@ -204,44 +213,57 @@ class PIIDatabase:
                   settings: Dict[str, Any] = None, 
                   metadata: Dict[str, Any] = None) -> int:
         """
-        Create a new job in the database.
+        Create a new job in the database
         
         Args:
-            command_line: Command line used to start the job
-            name: Name for the job
+            command_line: The command line that started the job
+            name: Job name for display
             settings: Dictionary of job settings
-            metadata: Dictionary of additional metadata
+            metadata: Dictionary of job metadata
             
         Returns:
-            job_id: ID of the created job
+            ID of the new job
         """
         try:
-            now = datetime.now()
+            now = datetime.now().isoformat()
+            
+            # Ensure metadata is a dictionary
+            if metadata is None:
+                metadata = {}
+            
+            # Convert settings to JSON if present
             settings_json = json.dumps(settings) if settings else None
             
+            # Create the job
             with self.conn:
                 cursor = self.conn.cursor()
-                cursor.execute(
-                    """
-                    INSERT INTO jobs (name, start_time, last_updated, status, command_line, settings)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (name, now, now, 'created', command_line, settings_json)
-                )
+                cursor.execute("""
+                INSERT INTO jobs (
+                    name, start_time, last_updated, status, command_line, settings
+                ) VALUES (?, ?, ?, 'created', ?, ?)
+                """, (name, now, now, command_line, settings_json))
+                
                 job_id = cursor.lastrowid
                 
-                # Store additional metadata if provided
-                if metadata:
-                    for key, value in metadata.items():
-                        cursor.execute(
-                            """
-                            INSERT INTO job_metadata (job_id, key, value)
-                            VALUES (?, ?, ?)
-                            """,
-                            (job_id, key, str(value))
-                        )
+                # Store metadata
+                for key, value in metadata.items():
+                    cursor.execute("""
+                    INSERT INTO job_metadata (job_id, key, value)
+                    VALUES (?, ?, ?)
+                    """, (job_id, key, str(value)))
+                
+                # Make sure directory is always set if provided in name
+                if 'directory' not in metadata and name.startswith('PII Analysis - '):
+                    # Extract directory from name
+                    directory = name[len('PII Analysis - '):]
+                    if directory and directory != '.':
+                        cursor.execute("""
+                        INSERT INTO job_metadata (job_id, key, value)
+                        VALUES (?, ?, ?)
+                        """, (job_id, 'directory', directory))
                 
                 logger.info(f"Created new job with ID {job_id}")
+                
                 return job_id
         except sqlite3.Error as e:
             logger.error(f"Error creating job: {e}")

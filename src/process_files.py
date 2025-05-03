@@ -19,6 +19,7 @@ sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
 from rich.console import Console
 from rich.progress import Progress, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.table import Table
+from rich.prompt import Prompt
 
 from src.database.db_utils import get_database
 from src.core.file_discovery import (
@@ -69,6 +70,9 @@ Examples:
   # Resume processing from a previous run
   python src/process_files.py /path/to/documents --db-path results.db --resume
   
+  # Resume a specific job by ID
+  python src/process_files.py /path/to/documents --db-path results.db --resume --job-id 123
+  
   # Process with 8 worker threads
   python src/process_files.py /path/to/documents --workers 8
   
@@ -77,6 +81,9 @@ Examples:
   
   # Show job status
   python src/process_files.py --db-path results.db --status
+  
+  # List all jobs for a directory
+  python src/process_files.py --db-path results.db --list-jobs /path/to/documents
   
   # Run in detached mode (continue even if terminal closes)
   python src/process_files.py /path/to/documents --detach
@@ -100,6 +107,8 @@ Examples:
     # Processing control
     parser.add_argument('--resume', action='store_true',
                         help='Resume processing from last point')
+    parser.add_argument('--job-id', type=int, default=None,
+                        help='Specific job ID to process, resume, export or show status for')
     parser.add_argument('--force-restart', action='store_true',
                         help='Force restart of processing')
     parser.add_argument('--reset-db', action='store_true',
@@ -116,6 +125,8 @@ Examples:
                         help='Follow logs of a detached process (by PID or timestamp)')
     parser.add_argument('--list-detached', action='store_true',
                         help='List all detached processes')
+    parser.add_argument('--list-jobs', type=str, metavar='DIRECTORY', 
+                        help='List all jobs for a specific directory')
     
     # File filtering
     parser.add_argument('--extensions', type=str, default=None,
@@ -138,8 +149,6 @@ Examples:
     # Output options
     parser.add_argument('--export', type=str, default=None,
                         help='Export results to JSON file')
-    parser.add_argument('--job-id', type=int, default=None,
-                        help='Specific job ID to export or show status for')
     parser.add_argument('--status', action='store_true',
                         help='Show job status and exit')
     parser.add_argument('--verbose', action='store_true',
@@ -331,114 +340,136 @@ def export_to_json(db_path: str, output_path: str, job_id: Optional[int] = None)
     # Close database
     db.close()
 
+def list_jobs_for_directory(db_path: str, directory: str):
+    """
+    List all jobs for a specific directory
+    
+    Args:
+        db_path: Path to the database
+        directory: Directory to list jobs for
+    """
+    # Connect to database
+    db = get_database(db_path)
+    
+    # Get jobs for directory
+    jobs = db.get_jobs_by_metadata('directory', directory)
+    
+    if not jobs:
+        console.print(f"[yellow]No jobs found for directory: {directory}[/yellow]")
+        return
+    
+    # Create table for jobs
+    jobs_table = Table(title=f"Jobs for directory: {directory}", show_header=True, header_style="bold")
+    jobs_table.add_column("Job ID", style="cyan", justify="right")
+    jobs_table.add_column("Name", style="green")
+    jobs_table.add_column("Start Time", style="blue")
+    jobs_table.add_column("Status", style="magenta")
+    jobs_table.add_column("Files", justify="right")
+    jobs_table.add_column("Progress", justify="right")
+    
+    for job in jobs:
+        job_id = job['job_id']
+        status = job.get('status', 'unknown')
+        status_color = {
+            'completed': 'green',
+            'running': 'blue',
+            'interrupted': 'yellow',
+            'error': 'red',
+        }.get(status, 'white')
+        
+        total_files = job.get('total_files', 0)
+        processed_files = job.get('processed_files', 0)
+        progress = f"{processed_files}/{total_files}"
+        progress_pct = f"{(processed_files / total_files * 100):.1f}%" if total_files > 0 else "0%"
+        
+        jobs_table.add_row(
+            str(job_id),
+            job.get('name', 'Unnamed'),
+            job.get('start_time', 'unknown'),
+            f"[{status_color}]{status}[/{status_color}]",
+            progress,
+            progress_pct
+        )
+    
+    console.print(jobs_table)
+    console.print("\nTo resume a specific job, use: --resume --job-id <JOB_ID>")
+
 def process_directory(args):
     """
-    Process directory with the specified options
+    Process a directory of files with PII analysis
     
     Args:
         args: Command-line arguments
     """
-    # Configure logging - adjust based on verbose mode
-    if args.verbose:
-        # Keep console logging in verbose mode
-        pass
-    else:
-        # In progress bar mode, redirect logs to file only
-        for handler in logging.root.handlers[:]:
-            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
-                logging.root.removeHandler(handler)
-    
     # Connect to database
     db = get_database(args.db_path)
     
-    # Parse extensions
+    # Set up supported extensions
+    extensions = None
     if args.extensions:
-        extensions = set('.' + ext.lower().lstrip('.') for ext in args.extensions.split(','))
-    else:
-        extensions = DEFAULT_EXTENSIONS
+        # Parse comma-separated extensions
+        extensions = set(ext.strip().lower() for ext in args.extensions.split(','))
+        # Add dot prefix if not present
+        extensions = {ext if ext.startswith('.') else f'.{ext}' for ext in extensions}
+        logger.info(f"Using custom extensions: {extensions}")
     
-    # Parse entities if provided
-    entity_list = None
-    if args.entities:
-        entity_list = [e.strip() for e in args.entities.split(',')]
-    
-    # Prepare analyzer settings
-    analyzer_settings = {
-        'threshold': args.threshold,
-        'entities': entity_list,
-        'force_ocr': args.ocr,
-        'ocr_dpi': args.ocr_dpi,
-        'ocr_threads': args.ocr_threads,
-        'max_pages': args.max_pages,
-        'debug': args.debug
-    }
-    
-    # Check if this is a run after a database reset
+    # Reset database if requested
     is_after_db_reset = False
-    if hasattr(args, 'after_db_reset') and args.after_db_reset:
+    if args.reset_db:
+        reset_database(args.db_path)
         is_after_db_reset = True
-        logger.info("Running after database reset, will skip file registration")
-
-    # Setup progress bar for directory scanning
-    scan_progress = None
-    scan_task = None
-    scan_file_counter = 0
     
+    # Define callback for scan progress updates
     def scan_progress_callback(state):
-        nonlocal scan_progress, scan_task, scan_file_counter
-        
         if state['type'] == 'scan_progress':
-            scan_file_counter = state['total_files']
-            if scan_progress and scan_task:
-                current_file = os.path.basename(state['current_file'])
-                scan_progress.update(
-                    scan_task, 
-                    description=f"[cyan]Scanning directory: found {scan_file_counter} files...",
-                    refresh=True
-                )
-        elif state['type'] == 'scan_complete':
-            if scan_progress and scan_task:
-                scan_progress.update(
-                    scan_task, 
-                    description=f"[green]Directory scan complete: {state['total_files']} files found, {state['new_files']} registered",
-                    refresh=True
-                )
+            # Update every 100 files or every 0.5 seconds
+            elapsed = state.get('elapsed', 0)
+            total_files = state.get('total_files', 0)
+            new_files = state.get('new_files', 0)
+            current_file = state.get('current_file', '')
+            
+            # Format current file to show just the leaf name
+            current_basename = os.path.basename(current_file) if current_file else ''
+            
+            # Update the description
+            scan_progress.update(
+                scan_task, 
+                description=f"[cyan]Scanning directory... Found {total_files} files ({new_files} new) - {current_basename}"
+            )
     
-    # Handle force restart option
+    # Determine job ID based on command-line arguments
+    job_id = None
+    
+    # Force restart requested
     if args.force_restart:
+        if args.directory is None:
+            logger.error("Directory is required for force restart")
+            return
+        
         # Look for an existing job for this directory
         existing_jobs = db.get_jobs_by_metadata('directory', args.directory)
         
-        if existing_jobs:
+        if existing_jobs and args.job_id is not None:
+            # Check if the requested job ID exists
+            job_exists = any(job['job_id'] == args.job_id for job in existing_jobs)
+            if job_exists:
+                job_id = args.job_id
+                logger.info(f"Force restarting job {job_id}")
+                
+                # Clear all files for the job
+                cleared_files = db.clear_files_for_job(job_id)
+                logger.info(f"Cleared {cleared_files} files for forced restart")
+            else:
+                logger.error(f"Job ID {args.job_id} not found for the specified directory")
+                return
+        elif existing_jobs:
+            # Use the most recent job
             job_id = existing_jobs[0]['job_id']
-            logger.info(f"Force restarting job {job_id} for directory {args.directory}")
+            logger.info(f"Force restarting job {job_id} (using most recent job)")
             
             # Clear all files for the job
             cleared_files = db.clear_files_for_job(job_id)
-            
-            if cleared_files > 0:
-                logger.info(f"Cleared {cleared_files} files for forced restart")
-            
-            # Setup progress display for scanning
-            with Progress(
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(pulse_style="cyan"),
-                TimeElapsedColumn(),
-                console=console
-            ) as scan_progress:
-                # Create indeterminate progress task for scanning
-                scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
-                
-                # Scan directory with fresh slate
-                total, new = scan_directory(
-                    args.directory,
-                    db,
-                    job_id,
-                    supported_extensions=extensions,
-                    progress_callback=scan_progress_callback
-                )
-            
-            logger.info(f"Rescanned directory: found {total} files, registered {new} new files")
+            logger.info(f"Cleared {cleared_files} files for forced restart")
         else:
             # No existing job, create new one
             job_id = db.create_job(
@@ -446,6 +477,109 @@ def process_directory(args):
                 metadata={'directory': args.directory}
             )
             logger.info(f"Created new job {job_id} for force restart (no existing job found)")
+        
+        # Setup progress display for scanning
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(pulse_style="cyan"),
+            TimeElapsedColumn(),
+            console=console
+        ) as scan_progress:
+            # Create indeterminate progress task for scanning
+            scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
+            
+            # Scan directory with fresh slate
+            total, new = scan_directory(
+                args.directory,
+                db,
+                job_id,
+                supported_extensions=extensions,
+                progress_callback=scan_progress_callback
+            )
+        
+        logger.info(f"Rescanned directory: found {total} files, registered {new} new files")
+    
+    # Check for resumable job
+    elif args.resume or is_after_db_reset:
+        # Look for an existing job for this directory
+        existing_jobs = db.get_jobs_by_metadata('directory', args.directory) if args.directory else []
+        
+        # If we have a specific job ID, check if it exists
+        if args.job_id is not None:
+            job = db.get_job(args.job_id)
+            if job:
+                job_id = args.job_id
+                logger.info(f"Using specified job ID: {job_id}")
+            else:
+                logger.error(f"Job ID {args.job_id} not found")
+                return
+        elif existing_jobs:
+            # Multiple jobs for the same directory - ask user to select if more than one
+            if len(existing_jobs) > 1 and not is_after_db_reset:
+                console.print(f"[yellow]Found {len(existing_jobs)} jobs for directory: {args.directory}[/yellow]")
+                
+                # Create table for jobs
+                jobs_table = Table(title="Available Jobs", show_header=True, header_style="bold")
+                jobs_table.add_column("Job ID", style="cyan", justify="right")
+                jobs_table.add_column("Name", style="green")
+                jobs_table.add_column("Start Time", style="blue")
+                jobs_table.add_column("Status", style="magenta")
+                jobs_table.add_column("Files", justify="right")
+                jobs_table.add_column("Progress", justify="right")
+                
+                for job in existing_jobs:
+                    job_id = job['job_id']
+                    status = job.get('status', 'unknown')
+                    status_color = {
+                        'completed': 'green',
+                        'running': 'blue',
+                        'interrupted': 'yellow',
+                        'error': 'red',
+                    }.get(status, 'white')
+                    
+                    total_files = job.get('total_files', 0)
+                    processed_files = job.get('processed_files', 0)
+                    progress = f"{processed_files}/{total_files}"
+                    progress_pct = f"{(processed_files / total_files * 100):.1f}%" if total_files > 0 else "0%"
+                    
+                    jobs_table.add_row(
+                        str(job_id),
+                        job.get('name', 'Unnamed'),
+                        job.get('start_time', 'unknown'),
+                        f"[{status_color}]{status}[/{status_color}]",
+                        progress,
+                        progress_pct
+                    )
+                
+                console.print(jobs_table)
+                
+                # Ask user to select a job
+                job_id_str = Prompt.ask(
+                    "Enter job ID to resume",
+                    default=str(existing_jobs[0]['job_id']),
+                    choices=[str(job['job_id']) for job in existing_jobs]
+                )
+                job_id = int(job_id_str)
+                logger.info(f"Selected job ID: {job_id}")
+            else:
+                # Use the first job
+                job_id = existing_jobs[0]['job_id']
+                logger.info(f"Using existing job {job_id}")
+        else:
+            # No existing jobs found, create a new one if we have a directory
+            if args.directory:
+                job_id = db.create_job(
+                    name=f"PII Analysis - {os.path.basename(args.directory)}",
+                    metadata={'directory': args.directory}
+                )
+                logger.info(f"Created new job {job_id} (no existing jobs found)")
+            else:
+                logger.error("Directory is required when no existing jobs are found")
+                return
+        
+        # Now that we have a job ID, continue with processing
+        if is_after_db_reset:
+            logger.info(f"Using job {job_id} after database reset")
             
             # Setup progress display for scanning
             with Progress(
@@ -455,29 +589,50 @@ def process_directory(args):
                 console=console
             ) as scan_progress:
                 # Create indeterminate progress task for scanning
-                scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
+                scan_task = scan_progress.add_task("[cyan]Scanning directory after reset...", total=None)
                 
-                # Scan directory
-                total, new = scan_directory(
-                    args.directory,
-                    db,
-                    job_id,
-                    supported_extensions=extensions,
-                    progress_callback=scan_progress_callback
+                # We need the directory for scanning
+                job = db.get_job(job_id)
+                if job and job.get('metadata', {}).get('directory'):
+                    directory = job['metadata']['directory']
+                    
+                    # Scan directory but skip registration after DB reset
+                    total, new = scan_directory(
+                        directory,
+                        db,
+                        job_id,
+                        supported_extensions=extensions,
+                        skip_registration=True,
+                        progress_callback=scan_progress_callback
+                    )
+                    
+                    logger.info(f"Scanned directory after DB reset: found {total} files (skipped registration)")
+                else:
+                    logger.error(f"Job {job_id} does not have directory metadata")
+                    return
+        elif args.directory:
+            # Check if job can be resumed
+            info = find_resumption_point(db, job_id)
+            
+            if info['status'] == 'resumable':
+                logger.info(f"Resuming job {job_id}: {info['message']}")
+                
+                # Reset any stalled files
+                reset_count = reset_stalled_files(db, job_id)
+                if reset_count > 0:
+                    logger.info(f"Reset {reset_count} stalled files to pending status")
+            else:
+                # Job cannot be resumed, ask if user wants to create a new job
+                if console.input(f"Job {job_id} cannot be resumed ({info['message']}). Create a new job? (y/n) ").lower() != 'y':
+                    logger.info("User chose not to create a new job")
+                    return
+                
+                # Create new job
+                job_id = db.create_job(
+                    name=f"PII Analysis - {os.path.basename(args.directory)}",
+                    metadata={'directory': args.directory}
                 )
-            
-            logger.info(f"Scanned directory: found {total} files, registered {new} new files")
-    
-    # Check for resumable job
-    elif args.resume or is_after_db_reset:
-        # Look for an existing job for this directory
-        existing_jobs = db.get_jobs_by_metadata('directory', args.directory)
-        
-        if existing_jobs:
-            job_id = existing_jobs[0]['job_id']
-            
-            if is_after_db_reset:
-                logger.info(f"Using existing job {job_id} after database reset")
+                logger.info(f"Created new job {job_id} (previous job cannot be resumed: {info['message']})")
                 
                 # Setup progress display for scanning
                 with Progress(
@@ -487,20 +642,43 @@ def process_directory(args):
                     console=console
                 ) as scan_progress:
                     # Create indeterminate progress task for scanning
-                    scan_task = scan_progress.add_task("[cyan]Scanning directory after reset...", total=None)
+                    scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
                     
-                    # Scan directory but skip registration after DB reset
+                    # Scan directory
                     total, new = scan_directory(
                         args.directory,
                         db,
                         job_id,
                         supported_extensions=extensions,
-                        skip_registration=True,
                         progress_callback=scan_progress_callback
                     )
                 
-                logger.info(f"Scanned directory after DB reset: found {total} files (skipped registration)")
-            else:
+                logger.info(f"Scanned directory: found {total} files, registered {new} new files")
+        else:
+            # No directory provided but we have a job ID
+            job = db.get_job(job_id)
+            
+            # Try to extract directory from metadata
+            directory = None
+            if job and 'metadata' in job:
+                directory = job['metadata'].get('directory')
+            
+            # If still no directory, try to extract from job name
+            if not directory and job and job.get('name', '').startswith('PII Analysis - '):
+                dir_name = job['name'][len('PII Analysis - '):]
+                if dir_name and os.path.isdir(dir_name):
+                    directory = dir_name
+                    # Add this to metadata for future use
+                    db.conn.execute(
+                        "INSERT OR REPLACE INTO job_metadata (job_id, key, value) VALUES (?, 'directory', ?)",
+                        (job_id, directory)
+                    )
+                    db.conn.commit()
+            
+            if directory:
+                logger.info(f"Using directory from job metadata: {directory}")
+                args.directory = directory
+                
                 # Check if job can be resumed
                 info = find_resumption_point(db, job_id)
                 
@@ -512,63 +690,18 @@ def process_directory(args):
                     if reset_count > 0:
                         logger.info(f"Reset {reset_count} stalled files to pending status")
                 else:
-                    # Create new job
-                    job_id = db.create_job(
-                        name=f"PII Analysis - {os.path.basename(args.directory)}",
-                        metadata={'directory': args.directory}
-                    )
-                    logger.info(f"Created new job {job_id} (previous job cannot be resumed: {info['message']})")
-                    
-                    # Setup progress display for scanning
-                    with Progress(
-                        TextColumn("[progress.description]{task.description}"),
-                        BarColumn(pulse_style="cyan"),
-                        TimeElapsedColumn(),
-                        console=console
-                    ) as scan_progress:
-                        # Create indeterminate progress task for scanning
-                        scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
-                        
-                        # Scan directory
-                        total, new = scan_directory(
-                            args.directory,
-                            db,
-                            job_id,
-                            supported_extensions=extensions,
-                            progress_callback=scan_progress_callback
-                        )
-                    
-                    logger.info(f"Scanned directory: found {total} files, registered {new} new files")
-        else:
-            # No existing job, create new one
-            job_id = db.create_job(
-                name=f"PII Analysis - {os.path.basename(args.directory)}",
-                metadata={'directory': args.directory}
-            )
-            logger.info(f"Created new job {job_id} (no existing jobs found)")
-            
-            # Setup progress display for scanning
-            with Progress(
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(pulse_style="cyan"),
-                TimeElapsedColumn(),
-                console=console
-            ) as scan_progress:
-                # Create indeterminate progress task for scanning
-                scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
-                
-                # Scan directory
-                total, new = scan_directory(
-                    args.directory,
-                    db,
-                    job_id,
-                    supported_extensions=extensions,
-                    progress_callback=scan_progress_callback
-                )
-            
-            logger.info(f"Scanned directory: found {total} files, registered {new} new files")
+                    logger.error(f"Job {job_id} cannot be resumed: {info['message']}")
+                    return
+            else:
+                logger.error(f"No directory provided and job {job_id} doesn't have directory metadata")
+                logger.error("Please specify a directory with --directory")
+                return
     else:
         # Create new job
+        if args.directory is None:
+            logger.error("Directory is required for new job")
+            return
+            
         job_id = db.create_job(
             name=f"PII Analysis - {os.path.basename(args.directory)}",
             metadata={'directory': args.directory}
@@ -617,7 +750,15 @@ def process_directory(args):
                 max_workers=args.workers,
                 batch_size=args.batch_size,
                 max_files=args.max_files,
-                settings=analyzer_settings
+                settings={
+                    'threshold': args.threshold,
+                    'entities': args.entities,
+                    'force_ocr': args.ocr,
+                    'ocr_dpi': args.ocr_dpi,
+                    'ocr_threads': args.ocr_threads,
+                    'max_pages': args.max_pages,
+                    'debug': args.debug
+                }
             )
             
             # Show results
@@ -673,7 +814,15 @@ def process_directory(args):
                     max_workers=args.workers,
                     batch_size=args.batch_size,
                     max_files=args.max_files,
-                    settings=analyzer_settings,
+                    settings={
+                        'threshold': args.threshold,
+                        'entities': args.entities,
+                        'force_ocr': args.ocr,
+                        'ocr_dpi': args.ocr_dpi,
+                        'ocr_threads': args.ocr_threads,
+                        'max_pages': args.max_pages,
+                        'debug': args.debug
+                    },
                     progress_callback=progress_callback
                 )
             
@@ -931,107 +1080,49 @@ def reset_database(db_path: str):
 
 def main():
     """Main entry point"""
-    # Parse arguments
     args = parse_args()
     
-    # Handle --status option
+    # Set up logging level
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.debug("Debug mode enabled")
+    
+    # Handle --list-jobs
+    if args.list_jobs:
+        list_jobs_for_directory(args.db_path, args.list_jobs)
+        return
+    
+    # Handle --status
     if args.status:
         show_status(args.db_path, args.job_id)
         return
     
-    # Handle --export option
+    # Handle --export
     if args.export:
         export_to_json(args.db_path, args.export, args.job_id)
         return
     
-    # Handle --follow option
-    if args.follow:
-        follow_process(args.follow)
-        return
-    
-    # Handle --list-detached option
+    # Handle --list-detached
     if args.list_detached:
         list_detached_processes()
         return
     
-    # Handle --reset-db option
-    if args.reset_db:
-        reset_count = reset_database(args.db_path)
-        
-        # If user also specified a directory, immediately process it after reset
-        if args.directory and reset_count > 0:
-            console.print("\n[bold green]Continuing with processing files...[/bold green]")
-            # Set a flag that we're running after a database reset
-            args.after_db_reset = True
-            process_directory(args)
+    # Handle --follow
+    if args.follow:
+        follow_process(args.follow)
         return
     
-    # Make sure directory is specified for all other operations
-    if not args.directory:
-        console.print("[bold red]Error:[/bold red] Directory must be specified unless using --status, --export, --follow, --reset-db, or --list-detached")
-        console.print("Run with --help for usage information")
+    # Check if we have a directory or specific options
+    if not args.directory and not args.reset_db and not args.resume:
+        print("Error: directory argument is required unless using --status, --export, --reset-db, --list-jobs, or --resume with --job-id")
         return
     
-    # Verify directory exists
-    if not os.path.isdir(args.directory):
-        console.print(f"[bold red]Error:[/bold red] Directory not found: {args.directory}")
-        return
-    
-    # Handle detached mode
+    # Handle --detach
     if args.detach:
-        try:
-            # Check if the necessary tools are available
-            import subprocess
-            result = subprocess.run(["which", "nohup"], capture_output=True, text=True)
-            if result.returncode != 0:
-                console.print("[bold red]Error:[/bold red] 'nohup' command not found. Detached mode is not available.")
-                return
-            
-            # Prepare command to re-run script in detached mode
-            script_path = os.path.abspath(sys.argv[0])
-            current_dir = os.getcwd()
-            
-            # Build the command, excluding the --detach flag
-            cmd_args = [arg for arg in sys.argv[1:] if arg != "--detach" and arg != "-d"]
-            cmd = ["nohup", sys.executable, script_path] + cmd_args
-            
-            # Add output redirection
-            logs_dir = os.path.join(current_dir, "logs")
-            os.makedirs(logs_dir, exist_ok=True)
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            log_file = os.path.join(logs_dir, f"pii_analysis_{timestamp}.log")
-            
-            # Create command string with output redirection
-            cmd_str = " ".join(cmd) + f" > {log_file} 2>&1 &"
-            
-            # Print info
-            console.print(f"[bold green]Starting process in detached mode[/bold green]")
-            console.print(f"Output will be logged to: [cyan]{log_file}[/cyan]")
-            console.print("To check status, use:")
-            console.print(f"[dim]  python {script_path} --db-path {args.db_path} --status[/dim]")
-            console.print("To follow output, use:")
-            console.print(f"[dim]  python {script_path} --follow {timestamp}[/dim]")
-            
-            # Execute the command
-            pid = subprocess.Popen(cmd_str, shell=True, start_new_session=True).pid
-            console.print(f"Process started with PID: {pid}")
-            
-            # Write PID to a file for reference
-            pid_file = os.path.join(logs_dir, f"pii_analysis_{timestamp}.pid")
-            with open(pid_file, 'w') as f:
-                f.write(str(pid))
-            console.print(f"PID file: [cyan]{pid_file}[/cyan]")
-            
-            # Write timestamp to a file for reference
-            timestamp_file = os.path.join(logs_dir, f"{pid}.timestamp")
-            with open(timestamp_file, 'w') as f:
-                f.write(timestamp)
-            
-            return
-            
-        except Exception as e:
-            console.print(f"[bold red]Error starting detached process:[/bold red] {str(e)}")
-            console.print("Continuing in normal mode...")
+        # Start a detached process
+        from src.utils.process_utils import start_detached_process
+        start_detached_process(sys.argv)
+        return
     
     # Process directory
     process_directory(args)
