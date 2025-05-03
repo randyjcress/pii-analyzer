@@ -52,7 +52,20 @@ def is_supported_file(file_path: str, supported_extensions: Set[str]) -> bool:
         True if file type is supported, False otherwise
     """
     file_type = get_file_type(file_path)
-    return file_type in supported_extensions
+    
+    # Handle extensions with or without dots
+    if file_type in supported_extensions:
+        return True
+    
+    # Try without the dot if extension has a dot
+    if file_type.startswith('.') and file_type[1:] in supported_extensions:
+        return True
+    
+    # Try with a dot if supported_extensions have dots but file_type doesn't
+    if not file_type.startswith('.') and f'.{file_type}' in supported_extensions:
+        return True
+        
+    return False
 
 def scan_directory(
     directory_path: str, 
