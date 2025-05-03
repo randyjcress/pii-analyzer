@@ -258,8 +258,9 @@ def generate_executive_summary(classified_files: Dict[str, Dict], original_repor
             total_files = sum(file_type_stats.values())
             
             # Get file processing statistics
-            from src.database.db_reporting import get_file_processing_stats
+            from src.database.db_reporting import get_file_processing_stats, get_processing_time_stats
             file_processing_stats = get_file_processing_stats(db_path, job_id)
+            time_stats = get_processing_time_stats(db_path, job_id)
         except Exception as e:
             print(f"Warning: Could not extract file statistics from database: {e}")
     
@@ -298,6 +299,19 @@ def generate_executive_summary(classified_files: Dict[str, Dict], original_repor
             output.append(f"  Pending: {pending} files")
             output.append(f"  In Progress: {processing} files")
             output.append(f"  Error: {error} files")
+            
+            # Add processing time and completion estimates if available
+            if time_stats:
+                elapsed_time = time_stats.get('elapsed_time_formatted', '0:00:00')
+                files_per_hour = time_stats.get('files_per_hour', 0)
+                estimated_completion = time_stats.get('estimated_completion_time', 'Unknown')
+                
+                output.append(f"Processing Time Statistics:")
+                output.append(f"  Total Processing Time: {elapsed_time}")
+                output.append(f"  Processing Rate: {files_per_hour} files/hour")
+                
+                if pending > 0 and files_per_hour > 0:
+                    output.append(f"  Estimated Time to Completion: {estimated_completion}")
         else:
             output.append(f"Total Files Analyzed: {total_files}")
             
