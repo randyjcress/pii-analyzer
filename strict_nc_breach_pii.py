@@ -240,7 +240,6 @@ def analyze_pii_database(db_path, job_id=None, threshold=HIGH_CONFIDENCE_THRESHO
 
 def generate_executive_summary(high_risk_files, original_report_path=None, db_path=None, job_id=None):
     """Generate a concise executive summary report of high-risk files."""
-    print("DEBUG: Entering generate_executive_summary")
     output = []
     output.append(f"NC §75-61 BREACH NOTIFICATION EXECUTIVE SUMMARY")
     output.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -253,28 +252,19 @@ def generate_executive_summary(high_risk_files, original_report_path=None, db_pa
     
     # Try to extract file type information and processing stats from the database if provided
     if db_path:
-        print(f"DEBUG: db_path: {db_path}, job_id: {job_id}")
         try:
             file_type_stats = get_file_type_statistics(db_path, job_id)
-            print(f"DEBUG: file_type_stats: {file_type_stats}")
             total_files = sum(file_type_stats.values())
-            print(f"DEBUG: total_files: {total_files}")
             
             # Get file processing statistics
             from src.database.db_reporting import get_file_processing_stats, get_processing_time_stats
             file_processing_stats = get_file_processing_stats(db_path, job_id)
-            print(f"DEBUG: file_processing_stats: {file_processing_stats}")
             time_stats = get_processing_time_stats(db_path, job_id)
-            print(f"DEBUG: time_stats: {time_stats}")
         except Exception as e:
-            import traceback
-            print(f"DEBUG ERROR in generate_executive_summary: {e}")
-            traceback.print_exc()
             print(f"Warning: Could not extract file statistics from database: {e}")
     
     # If database not provided or failed, try from the original report
     if not file_type_stats and original_report_path and os.path.exists(original_report_path):
-        print(f"DEBUG: Trying to get stats from original_report_path: {original_report_path}")
         try:
             with open(original_report_path, 'r') as f:
                 data = json.load(f)
@@ -632,11 +622,7 @@ def main():
         return high_risk_files
         
     except Exception as e:
-        import traceback
-        import sys
         print(f"Error: {e}")
-        print("\nDetailed traceback:")
-        traceback.print_exc(file=sys.stdout)
         return {}
 
 if __name__ == "__main__":
