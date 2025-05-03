@@ -577,7 +577,7 @@ Examples:
                         help=f"Confidence threshold (default: {HIGH_CONFIDENCE_THRESHOLD})")
     parser.add_argument("--copy-high-risk-files", "-c", type=str,
                        help="Copy high-risk files to specified directory")
-    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress INFO level log messages")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show INFO level log messages")
     
     return parser.parse_args()
 
@@ -585,10 +585,13 @@ def main():
     """Main function."""
     args = parse_arguments()
     
-    # Configure logging level based on quiet flag
-    if args.quiet:
-        logging.getLogger().setLevel(logging.WARNING)
-        logging.getLogger('pii_database').setLevel(logging.WARNING)
+    # Configure logging level - default to WARNING unless verbose is specified
+    logging.getLogger().setLevel(logging.WARNING)
+    logging.getLogger('pii_database').setLevel(logging.WARNING)
+    
+    if args.verbose:
+        logging.getLogger().setLevel(logging.INFO)
+        logging.getLogger('pii_database').setLevel(logging.INFO)
     
     try:
         # Analyze PII data based on input type
