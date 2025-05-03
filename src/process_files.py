@@ -73,6 +73,9 @@ Examples:
   # Resume a specific job by ID
   python src/process_files.py /path/to/documents --db-path results.db --resume --job-id 123
   
+  # Resume without rescanning the directory
+  python src/process_files.py /path/to/documents --db-path results.db --resume --skip-scan
+  
   # Process with 8 worker threads
   python src/process_files.py /path/to/documents --workers 8
   
@@ -113,6 +116,8 @@ Examples:
                         help='Force restart of processing')
     parser.add_argument('--reset-db', action='store_true',
                         help='Reset all files to pending status (keeps file records)')
+    parser.add_argument('--skip-scan', action='store_true',
+                        help='Skip directory scanning when resuming (use existing files in database)')
     parser.add_argument('--workers', type=int, default=None,
                         help='Number of worker threads (default: auto)')
     parser.add_argument('--batch-size', type=int, default=10,
@@ -613,27 +618,31 @@ def process_directory(args):
                     return
         elif args.directory:
             # For normal resume with directory, rescan to find any new files
-            # Setup progress display for scanning
-            with Progress(
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(pulse_style="cyan"),
-                TimeElapsedColumn(),
-                console=console
-            ) as scan_progress:
-                # Create indeterminate progress task for scanning
-                scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
+            # Skip scanning if --skip-scan option is provided
+            if not args.skip_scan:
+                # Setup progress display for scanning
+                with Progress(
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(pulse_style="cyan"),
+                    TimeElapsedColumn(),
+                    console=console
+                ) as scan_progress:
+                    # Create indeterminate progress task for scanning
+                    scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
+                    
+                    # Rescan to find any new files since last run
+                    total, new = scan_directory(
+                        args.directory,
+                        db,
+                        job_id,
+                        supported_extensions=extensions,
+                        progress_callback=scan_progress_callback,
+                        verbose=args.verbose
+                    )
                 
-                # Rescan to find any new files since last run
-                total, new = scan_directory(
-                    args.directory,
-                    db,
-                    job_id,
-                    supported_extensions=extensions,
-                    progress_callback=scan_progress_callback,
-                    verbose=args.verbose
-                )
-            
-            logger.info(f"Scanned directory: found {total} files, registered {new} new files")
+                logger.info(f"Scanned directory: found {total} files, registered {new} new files")
+            else:
+                logger.info("Skipping directory scan as requested with --skip-scan")
         
         # Find resumption point for this job
         resumption = find_resumption_point(db, job_id)
