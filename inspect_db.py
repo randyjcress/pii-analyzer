@@ -28,8 +28,13 @@ def inspect_database(db_path):
     print("\n=== JOBS ===")
     for job in jobs:
         print(f"Job ID: {job['job_id']}")
-        print(f"Name: {job.get('name', 'Unknown')}")
-        print(f"Status: {job.get('status', 'Unknown')}")
+        
+        # Safely access columns that might not exist
+        name = job['name'] if 'name' in job.keys() else 'Unknown'
+        status = job['status'] if 'status' in job.keys() else 'Unknown'
+        
+        print(f"Name: {name}")
+        print(f"Status: {status}")
         
         # Handle datetime objects safely
         for col in ['start_time', 'last_updated']:
@@ -40,9 +45,14 @@ def inspect_database(db_path):
                 else:
                     print(f"{col}: {val}")
         
-        print(f"Total Files: {job.get('total_files', 0)}")
-        print(f"Processed Files: {job.get('processed_files', 0)}")
-        print(f"Error Files: {job.get('error_files', 0)}")
+        # Safely access other columns
+        total_files = job['total_files'] if 'total_files' in job.keys() else 0
+        processed_files = job['processed_files'] if 'processed_files' in job.keys() else 0
+        error_files = job['error_files'] if 'error_files' in job.keys() else 0
+        
+        print(f"Total Files: {total_files}")
+        print(f"Processed Files: {processed_files}")
+        print(f"Error Files: {error_files}")
         print("---")
 
     # Get job metadata
@@ -85,7 +95,7 @@ def inspect_database(db_path):
         job_ids = [job['job_id'] for job in jobs]
         if job_ids:
             for job_id in job_ids:
-                print(f"INSERT INTO job_metadata (job_id, key, value) VALUES ({job_id}, 'directory', '/CoWS/');")
+                print(f"sqlite3 {db_path} \"INSERT INTO job_metadata (job_id, key, value) VALUES ({job_id}, 'directory', '/CoWS/');\"")
         
     conn.close()
 
