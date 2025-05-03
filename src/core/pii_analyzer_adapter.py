@@ -10,6 +10,7 @@ import logging
 import subprocess
 import tempfile
 import json
+import psutil
 from typing import Dict, Any, List, Optional, Tuple
 
 # Configure logging
@@ -37,7 +38,19 @@ def analyze_file(
     Returns:
         Dictionary with processing results
     """
+    # Record memory usage at start
+    start_memory = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+    
+    # Record start time for overall processing
     start_time = time.time()
+    
+    # Track timing of individual components
+    timings = {
+        'setup': 0,
+        'execution': 0,
+        'result_processing': 0,
+        'cleanup': 0
+    }
     
     # Extract settings with defaults
     threshold = settings.get('threshold', 0.7)
@@ -48,9 +61,15 @@ def analyze_file(
     entities = settings.get('entities')
     debug = settings.get('debug', False)
     
+    # Start timing setup phase
+    setup_start = time.time()
+    
     # Create a temporary output file
     with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as tmp_file:
         temp_output = tmp_file.name
+    
+    # Record setup time
+    timings['setup'] = time.time() - setup_start
     
     try:
         # Build command for the PII analyzer
@@ -67,16 +86,29 @@ def analyze_file(
             cmd.append("--ocr")
         if ocr_dpi != 300:
             cmd.extend(["--ocr-dpi", str(ocr_dpi)])
-        if ocr_threads > 0:
-            cmd.extend(["--ocr-threads", str(ocr_threads)])
+        
+        # Always set OCR threads explicitly to avoid over-subscription
+        # Default to 1 thread per OCR process to better control overall parallelism
+        cmd.extend(["--ocr-threads", str(1 if ocr_threads <= 0 else ocr_threads)])
+        
         if max_pages is not None:
             cmd.extend(["--max-pages", str(max_pages)])
         
+        # Log the command if in debug mode
         if debug:
             logger.debug(f"Running command: {' '.join(cmd)}")
         
+        # Start timing execution phase
+        execution_start = time.time()
+        
         # Run the CLI tool with full output capture
         process = subprocess.run(cmd, capture_output=True, text=True)
+        
+        # Record execution time
+        timings['execution'] = time.time() - execution_start
+        
+        # Start timing result processing phase
+        result_processing_start = time.time()
         
         # Check if process returned an error
         if process.returncode != 0:
@@ -84,14 +116,23 @@ def analyze_file(
             if debug:
                 logger.error(f"Command failed: {error_msg}")
             
-            # Return minimal result with error info
+            # Record result processing time
+            timings['result_processing'] = time.time() - result_processing_start
+            
+            # Calculate memory usage
+            end_memory = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+            memory_delta = end_memory - start_memory
+            
+            # Return minimal result with error info and performance metrics
             return {
                 'file_path': file_path,
                 'success': False,
                 'error_message': error_msg,
                 'entities': [],
                 'file_size': os.path.getsize(file_path) if os.path.exists(file_path) else 0,
-                'processing_time': time.time() - start_time
+                'processing_time': time.time() - start_time,
+                'timings': timings,
+                'memory_usage_mb': memory_delta
             }
         
         # Check if output file exists and has content
@@ -100,14 +141,23 @@ def analyze_file(
             if debug:
                 logger.error(error_msg)
             
-            # Return minimal result with error info
+            # Record result processing time
+            timings['result_processing'] = time.time() - result_processing_start
+            
+            # Calculate memory usage
+            end_memory = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+            memory_delta = end_memory - start_memory
+            
+            # Return minimal result with error info and performance metrics
             return {
                 'file_path': file_path,
                 'success': False,
                 'error_message': error_msg,
                 'entities': [],
                 'file_size': os.path.getsize(file_path) if os.path.exists(file_path) else 0,
-                'processing_time': time.time() - start_time
+                'processing_time': time.time() - start_time,
+                'timings': timings,
+                'memory_usage_mb': memory_delta
             }
         
         # Try to read the JSON output
@@ -115,10 +165,27 @@ def analyze_file(
             with open(temp_output, 'r') as f:
                 result_data = json.load(f)
             
-            # Calculate processing time
+            # Record result processing time
+            timings['result_processing'] = time.time() - result_processing_start
+            
+            # Calculate overall processing time
             processing_time = time.time() - start_time
             
-            # Build consistent result format
+            # Calculate memory usage
+            end_memory = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+            memory_delta = end_memory - start_memory
+            
+            # Gather more detailed metrics if available
+            metadata = result_data.get('metadata', {})
+            metadata.update({
+                'process_stats': {
+                    'timings': timings,
+                    'memory_usage_mb': memory_delta,
+                    'pid': os.getpid()
+                }
+            })
+            
+            # Build consistent result format with performance metrics
             result = {
                 'file_path': file_path,
                 'success': True,
@@ -126,7 +193,9 @@ def analyze_file(
                 'file_size': os.path.getsize(file_path) if os.path.exists(file_path) else 0,
                 'processing_time': processing_time,
                 'text_length': result_data.get('text_length', 0),
-                'metadata': result_data.get('metadata', {})
+                'metadata': metadata,
+                'timings': timings,
+                'memory_usage_mb': memory_delta
             }
             
             return result
@@ -143,14 +212,23 @@ def analyze_file(
             if debug:
                 logger.error(f"JSON decode error: {error_msg}")
             
-            # Return minimal result with error info
+            # Record result processing time
+            timings['result_processing'] = time.time() - result_processing_start
+            
+            # Calculate memory usage
+            end_memory = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+            memory_delta = end_memory - start_memory
+            
+            # Return minimal result with error info and performance metrics
             return {
                 'file_path': file_path,
                 'success': False,
                 'error_message': error_msg,
                 'entities': [],
                 'file_size': os.path.getsize(file_path) if os.path.exists(file_path) else 0,
-                'processing_time': time.time() - start_time
+                'processing_time': time.time() - start_time,
+                'timings': timings,
+                'memory_usage_mb': memory_delta
             }
             
     except Exception as e:
@@ -158,20 +236,38 @@ def analyze_file(
         if debug:
             logger.error(f"Exception: {error_msg}")
         
-        # Return minimal result with error info
+        # Calculate execution time up to the exception
+        timings['execution'] = time.time() - (setup_start + timings['setup'])
+        
+        # Calculate memory usage
+        try:
+            end_memory = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+            memory_delta = end_memory - start_memory
+        except:
+            memory_delta = 0
+        
+        # Return minimal result with error info and available performance metrics
         return {
             'file_path': file_path,
             'success': False,
             'error_message': error_msg,
             'entities': [],
             'file_size': os.path.getsize(file_path) if os.path.exists(file_path) else 0,
-            'processing_time': time.time() - start_time
+            'processing_time': time.time() - start_time,
+            'timings': timings,
+            'memory_usage_mb': memory_delta
         }
     
     finally:
+        # Start timing cleanup phase
+        cleanup_start = time.time()
+        
         # Clean up temp file
         if os.path.exists(temp_output):
             try:
                 os.remove(temp_output)
             except:
-                pass 
+                pass
+        
+        # Record cleanup time
+        timings['cleanup'] = time.time() - cleanup_start 

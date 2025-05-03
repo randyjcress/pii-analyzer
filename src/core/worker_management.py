@@ -11,6 +11,7 @@ import logging
 import multiprocessing
 import queue
 import threading
+import os
 from typing import Callable, List, Dict, Any, Optional, Tuple
 
 from src.database.db_utils import get_database, PIIDatabase
@@ -78,7 +79,7 @@ def process_files_parallel(
         db: Database connection
         job_id: Job ID to process
         processing_func: Function that processes a single file
-        max_workers: Maximum number of worker threads (None for auto)
+        max_workers: Maximum number of worker processes (None for auto)
         batch_size: Number of files to fetch at once
         max_files: Maximum number of files to process (None for all)
         settings: Additional settings to pass to processing function
@@ -94,7 +95,7 @@ def process_files_parallel(
     if settings is None:
         settings = {}
     
-    # Get the database path for worker threads
+    # Get the database path for worker processes
     db_path = db.db_path
     
     start_time = time.time()
@@ -102,10 +103,11 @@ def process_files_parallel(
     files_remaining = True
     processed_count = 0
     
-    logger.info(f"Starting parallel processing with {max_workers} workers")
+    logger.info(f"Starting parallel processing with {max_workers} worker processes")
     
-    # Process files in batches until none remain or max reached
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+    # Create a process pool with fixed number of workers
+    # Use ProcessPoolExecutor instead of ThreadPoolExecutor for true parallelism
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         while files_remaining and (max_files is None or processed_count < max_files):
             # Get batch of pending files
             limit = min(batch_size, max_files - processed_count if max_files else batch_size)
@@ -115,21 +117,22 @@ def process_files_parallel(
                 files_remaining = False
                 break
             
-            # Submit jobs to thread pool
+            # Log batch information
+            logger.info(f"Processing batch of {len(pending_files)} files")
+            
+            # Submit jobs to process pool
             futures = []
             for file_id, file_path in pending_files:
                 # Mark file as processing
                 if db.mark_file_processing(file_id):
                     futures.append(
                         executor.submit(
-                            process_single_file_thread_safe,
+                            process_single_file_process_safe,
                             file_id,
                             file_path,
                             db_path,
                             job_id,
-                            processing_func,
-                            settings,
-                            stats_queue
+                            settings
                         )
                     )
             
@@ -138,24 +141,40 @@ def process_files_parallel(
                 try:
                     result = future.result()
                     
+                    if result.get('success', False):
+                        # Update the database with results
+                        db.store_file_results(
+                            result['file_id'], 
+                            result['processing_time'], 
+                            result.get('entities', []), 
+                            result.get('metadata', {})
+                        )
+                        db.mark_file_completed(result['file_id'], job_id)
+                        stats_queue.add_processed()
+                    else:
+                        # Mark as error
+                        db.mark_file_error(result['file_id'], job_id, result.get('error_message', 'Unknown error'))
+                        stats_queue.add_error()
+                    
                     # Call progress callback if provided
                     if progress_callback:
                         progress_callback({
-                            'type': 'file_completed',
+                            'type': 'file_completed' if result.get('success', False) else 'file_error',
                             'file_id': result.get('file_id'),
                             'file_path': result.get('file_path'),
-                            'entities': result.get('entities', [])
+                            'entities': result.get('entities', []),
+                            'error': result.get('error_message') if not result.get('success', False) else None
                         })
                     
                     # Check progress
                     processed, errors = stats_queue.get_stats()
-                    if processed % 100 == 0 and processed > 0:
+                    if processed % 10 == 0 and processed > 0:
                         elapsed = time.time() - start_time
                         rate = processed / elapsed if elapsed > 0 else 0
                         logger.info(f"Processed {processed} files in {elapsed:.2f}s ({rate:.2f} files/sec)")
                         
                 except Exception as e:
-                    logger.error(f"Worker thread error: {e}")
+                    logger.error(f"Worker process error: {e}")
                     
                     # Call progress callback for errors if provided
                     if progress_callback:
@@ -186,6 +205,56 @@ def process_files_parallel(
         'elapsed_time': elapsed,
         'files_per_second': rate
     }
+
+def process_single_file_process_safe(
+    file_id: int,
+    file_path: str,
+    db_path: str,
+    job_id: int,
+    settings: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Process a single file in a separate process with its own database connection.
+    
+    Args:
+        file_id: ID of the file to process
+        file_path: Path to the file
+        db_path: Path to the database
+        job_id: Job ID this file belongs to
+        settings: Additional settings to pass to processing function
+        
+    Returns:
+        Dictionary with processing results
+    """
+    from src.core.pii_analyzer_adapter import analyze_file
+    
+    # Set process name for better monitoring
+    try:
+        import setproctitle
+        setproctitle.setproctitle(f"pii-worker-{os.path.basename(file_path)}")
+    except ImportError:
+        pass
+    
+    start_time = time.time()
+    
+    try:
+        # Process the file
+        result = analyze_file(file_path, settings)
+        
+        # Add file ID for tracking
+        result['file_id'] = file_id
+        
+        return result
+    except Exception as e:
+        # Return error information
+        return {
+            'file_id': file_id,
+            'file_path': file_path,
+            'success': False,
+            'error_message': f"Process error: {str(e)}",
+            'entities': [],
+            'processing_time': time.time() - start_time
+        }
 
 def process_single_file_thread_safe(
     file_id: int,
