@@ -8,7 +8,7 @@ for resumable processing
 import os
 import time
 import logging
-from typing import List, Tuple, Set, Dict, Any, Optional
+from typing import List, Tuple, Set, Dict, Any, Optional, Callable
 from pathlib import Path
 
 from src.database.db_utils import PIIDatabase
@@ -60,7 +60,8 @@ def scan_directory(
     job_id: int,
     supported_extensions: Optional[Set[str]] = None,
     max_files: Optional[int] = None,
-    skip_registration: bool = False
+    skip_registration: bool = False,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
 ) -> Tuple[int, int]:
     """
     Scan directory for files and register them in the database.
@@ -72,6 +73,7 @@ def scan_directory(
         supported_extensions: Set of allowed file extensions (None for all)
         max_files: Maximum number of files to register
         skip_registration: If True, only count files but don't try to register them
+        progress_callback: Optional callback for progress updates
         
     Returns:
         Tuple of (total files found, newly registered files)
@@ -90,6 +92,7 @@ def scan_directory(
     total_files = 0
     new_files = 0
     start_time = time.time()
+    last_update_time = start_time
     
     try:
         for root, _, files in os.walk(directory_path):
@@ -106,6 +109,18 @@ def scan_directory(
                     continue
                     
                 total_files += 1
+                
+                # Update progress more frequently
+                current_time = time.time()
+                if progress_callback and (total_files % 100 == 0 or current_time - last_update_time > 0.5):
+                    progress_callback({
+                        'type': 'scan_progress',
+                        'total_files': total_files,
+                        'new_files': new_files,
+                        'current_file': file_path,
+                        'elapsed': current_time - start_time
+                    })
+                    last_update_time = current_time
                 
                 # Skip registration if requested (for use with reset database)
                 if skip_registration:
@@ -130,6 +145,15 @@ def scan_directory(
         elapsed = time.time() - start_time
         logger.info(f"Directory scan complete: found {total_files} files, "
                     f"registered {new_files} new files in {elapsed:.2f} seconds")
+        
+        # Final progress update
+        if progress_callback:
+            progress_callback({
+                'type': 'scan_complete',
+                'total_files': total_files,
+                'new_files': new_files,
+                'elapsed': elapsed
+            })
         
         return total_files, new_files
     

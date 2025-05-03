@@ -379,6 +379,31 @@ def process_directory(args):
         is_after_db_reset = True
         logger.info("Running after database reset, will skip file registration")
 
+    # Setup progress bar for directory scanning
+    scan_progress = None
+    scan_task = None
+    scan_file_counter = 0
+    
+    def scan_progress_callback(state):
+        nonlocal scan_progress, scan_task, scan_file_counter
+        
+        if state['type'] == 'scan_progress':
+            scan_file_counter = state['total_files']
+            if scan_progress and scan_task:
+                current_file = os.path.basename(state['current_file'])
+                scan_progress.update(
+                    scan_task, 
+                    description=f"[cyan]Scanning directory: found {scan_file_counter} files...",
+                    refresh=True
+                )
+        elif state['type'] == 'scan_complete':
+            if scan_progress and scan_task:
+                scan_progress.update(
+                    scan_task, 
+                    description=f"[green]Directory scan complete: {state['total_files']} files found, {state['new_files']} registered",
+                    refresh=True
+                )
+    
     # Handle force restart option
     if args.force_restart:
         # Look for an existing job for this directory
@@ -394,13 +419,25 @@ def process_directory(args):
             if cleared_files > 0:
                 logger.info(f"Cleared {cleared_files} files for forced restart")
             
-            # Scan directory with fresh slate
-            total, new = scan_directory(
-                args.directory,
-                db,
-                job_id,
-                supported_extensions=extensions
-            )
+            # Setup progress display for scanning
+            with Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(pulse_style="cyan"),
+                TimeElapsedColumn(),
+                console=console
+            ) as scan_progress:
+                # Create indeterminate progress task for scanning
+                scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
+                
+                # Scan directory with fresh slate
+                total, new = scan_directory(
+                    args.directory,
+                    db,
+                    job_id,
+                    supported_extensions=extensions,
+                    progress_callback=scan_progress_callback
+                )
+            
             logger.info(f"Rescanned directory: found {total} files, registered {new} new files")
         else:
             # No existing job, create new one
@@ -410,13 +447,25 @@ def process_directory(args):
             )
             logger.info(f"Created new job {job_id} for force restart (no existing job found)")
             
-            # Scan directory
-            total, new = scan_directory(
-                args.directory,
-                db,
-                job_id,
-                supported_extensions=extensions
-            )
+            # Setup progress display for scanning
+            with Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(pulse_style="cyan"),
+                TimeElapsedColumn(),
+                console=console
+            ) as scan_progress:
+                # Create indeterminate progress task for scanning
+                scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
+                
+                # Scan directory
+                total, new = scan_directory(
+                    args.directory,
+                    db,
+                    job_id,
+                    supported_extensions=extensions,
+                    progress_callback=scan_progress_callback
+                )
+            
             logger.info(f"Scanned directory: found {total} files, registered {new} new files")
     
     # Check for resumable job
@@ -430,14 +479,26 @@ def process_directory(args):
             if is_after_db_reset:
                 logger.info(f"Using existing job {job_id} after database reset")
                 
-                # Scan directory but skip registration after DB reset
-                total, new = scan_directory(
-                    args.directory,
-                    db,
-                    job_id,
-                    supported_extensions=extensions,
-                    skip_registration=True
-                )
+                # Setup progress display for scanning
+                with Progress(
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(pulse_style="cyan"),
+                    TimeElapsedColumn(),
+                    console=console
+                ) as scan_progress:
+                    # Create indeterminate progress task for scanning
+                    scan_task = scan_progress.add_task("[cyan]Scanning directory after reset...", total=None)
+                    
+                    # Scan directory but skip registration after DB reset
+                    total, new = scan_directory(
+                        args.directory,
+                        db,
+                        job_id,
+                        supported_extensions=extensions,
+                        skip_registration=True,
+                        progress_callback=scan_progress_callback
+                    )
+                
                 logger.info(f"Scanned directory after DB reset: found {total} files (skipped registration)")
             else:
                 # Check if job can be resumed
@@ -458,13 +519,25 @@ def process_directory(args):
                     )
                     logger.info(f"Created new job {job_id} (previous job cannot be resumed: {info['message']})")
                     
-                    # Scan directory
-                    total, new = scan_directory(
-                        args.directory,
-                        db,
-                        job_id,
-                        supported_extensions=extensions
-                    )
+                    # Setup progress display for scanning
+                    with Progress(
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(pulse_style="cyan"),
+                        TimeElapsedColumn(),
+                        console=console
+                    ) as scan_progress:
+                        # Create indeterminate progress task for scanning
+                        scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
+                        
+                        # Scan directory
+                        total, new = scan_directory(
+                            args.directory,
+                            db,
+                            job_id,
+                            supported_extensions=extensions,
+                            progress_callback=scan_progress_callback
+                        )
+                    
                     logger.info(f"Scanned directory: found {total} files, registered {new} new files")
         else:
             # No existing job, create new one
@@ -474,13 +547,25 @@ def process_directory(args):
             )
             logger.info(f"Created new job {job_id} (no existing jobs found)")
             
-            # Scan directory
-            total, new = scan_directory(
-                args.directory,
-                db,
-                job_id,
-                supported_extensions=extensions
-            )
+            # Setup progress display for scanning
+            with Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(pulse_style="cyan"),
+                TimeElapsedColumn(),
+                console=console
+            ) as scan_progress:
+                # Create indeterminate progress task for scanning
+                scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
+                
+                # Scan directory
+                total, new = scan_directory(
+                    args.directory,
+                    db,
+                    job_id,
+                    supported_extensions=extensions,
+                    progress_callback=scan_progress_callback
+                )
+            
             logger.info(f"Scanned directory: found {total} files, registered {new} new files")
     else:
         # Create new job
@@ -490,13 +575,25 @@ def process_directory(args):
         )
         logger.info(f"Created new job {job_id}")
         
-        # Scan directory
-        total, new = scan_directory(
-            args.directory,
-            db,
-            job_id,
-            supported_extensions=extensions
-        )
+        # Setup progress display for scanning
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(pulse_style="cyan"),
+            TimeElapsedColumn(),
+            console=console
+        ) as scan_progress:
+            # Create indeterminate progress task for scanning
+            scan_task = scan_progress.add_task("[cyan]Scanning directory...", total=None)
+            
+            # Scan directory
+            total, new = scan_directory(
+                args.directory,
+                db,
+                job_id,
+                supported_extensions=extensions,
+                progress_callback=scan_progress_callback
+            )
+        
         logger.info(f"Scanned directory: found {total} files, registered {new} new files")
     
     # Update job status to running
