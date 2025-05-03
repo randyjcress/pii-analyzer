@@ -40,6 +40,25 @@ safe_apt_install build-essential libssl-dev zlib1g-dev \
     libffi-dev liblzma-dev pkg-config libpq-dev git \
     unzip wget software-properties-common htop dstat iotop
 
+# Install Docker for Tika
+progress "Installing Docker for Tika"
+safe_apt_install ca-certificates gnupg lsb-release
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+    sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+safe_apt_update
+safe_apt_install docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-compose
+
+# Add current user to the docker group
+sudo usermod -aG docker $USER
+echo "NOTE: You'll need to log out and back in for Docker permissions to take effect"
+
+# Pull Tika Docker image
+progress "Pulling Tika Docker image"
+sudo docker pull apache/tika:2.6.0
+sudo docker image ls
+
 # Install Tesseract OCR and document handling utilities
 progress "Installing Tesseract OCR and document utilities"
 safe_apt_install tesseract-ocr libtesseract-dev tesseract-ocr-eng \
@@ -126,6 +145,20 @@ echo 'export PATH="$HOME/pii-venv/bin:$PATH"' >> ~/.bashrc
 echo 'export PYTHONPATH="$HOME/pii-analysis:$PYTHONPATH"' >> ~/.bashrc
 echo 'export PII_WORKER_COUNT=85' >> ~/.bashrc  # Set to ~90% of available cores
 echo 'export PII_MEMORY_LIMIT=4096' >> ~/.bashrc  # 4GB per worker in MB
+echo 'export TIKA_SERVER_ENDPOINT="http://localhost:9998"' >> ~/.bashrc
+
+# Create a script to start Tika server
+progress "Creating Tika server script"
+cat > ~/start_tika.sh << 'EOF'
+#!/bin/bash
+# Start Apache Tika server
+echo "Starting Apache Tika server..."
+docker run -d --name tika -p 9998:9998 apache/tika:2.6.0
+echo "Tika server is running at http://localhost:9998"
+echo "Check Tika status: curl http://localhost:9998/tika"
+EOF
+
+chmod +x ~/start_tika.sh
 
 # Create a script to activate the environment and run the tool
 progress "Creating helper scripts"
@@ -167,16 +200,21 @@ fi
 
 progress "Setup complete! Follow these steps to start processing:"
 echo ""
-echo "1. Use these scripts to run the PII analyzer:"
+echo "1. Start the Tika server (needed for document processing):"
+echo "   ~/start_tika.sh"
+echo ""
+echo "2. Use these scripts to run the PII analyzer:"
 echo "   ~/run_pii.sh /path/to/files --db-path results.db --monitor --workers 85"
 echo ""
-echo "2. Monitor processing in another terminal:"
+echo "3. Monitor processing in another terminal:"
 echo "   ~/monitor_pii.sh results.db"
 echo ""
 echo "System configuration:"
 echo "- Python 3.11 installed with required packages"
+echo "- Docker installed with Apache Tika 2.6.0"
 echo "- Virtual environment at ~/pii-venv"
 echo "- Worker count set to 85 (optimized for E96as_v5)"
 echo "- Memory limit set to 4GB per worker"
 echo ""
-echo "You may need to restart your shell or run 'source ~/.bashrc' for environment variables to take effect." 
+echo "You may need to restart your shell or run 'source ~/.bashrc' for environment variables to take effect."
+echo "You'll need to log out and back in for Docker permissions to take effect." 
