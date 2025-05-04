@@ -1,7 +1,7 @@
 version: '3'
 
 services:
-  tika:
+  tika1:
     image: apache/tika:2.9.1.0
     ports:
       - "9998:9998"
@@ -12,4 +12,30 @@ services:
       retries: 3
     restart: unless-stopped
     environment:
-      - JAVA_OPTS=-Xmx2g  # Allocate 2GB of memory to Tika 
+      - JAVA_OPTS=-Xmx4g  # Allocate 4GB of memory to Tika
+      
+  tika2:
+    image: apache/tika:2.9.1.0
+    ports:
+      - "9999:9998"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:9998/tika"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    environment:
+      - JAVA_OPTS=-Xmx4g  # Allocate 4GB of memory to Tika
+      
+  tika3:
+    image: apache/tika:2.9.1.0
+    ports:
+      - "10000:9998"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:9998/tika"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    environment:
+      - JAVA_OPTS=-Xmx4g  # Allocate 4GB of memory to Tika 

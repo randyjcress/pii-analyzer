@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Dict, Union
+from typing import Optional, Tuple, Dict, Union, List
 
 from ..utils.file_utils import get_extraction_method, is_supported_format
 from ..utils.logger import app_logger as logger
@@ -10,6 +10,8 @@ class ExtractorFactory:
     
     def __init__(self, 
                  tika_server: Optional[str] = None,
+                 tika_servers: Optional[List[str]] = None,
+                 use_load_balancer: bool = True,
                  tesseract_cmd: Optional[str] = None,
                  ocr_lang: str = 'eng',
                  ocr_dpi: int = 300,
@@ -19,7 +21,9 @@ class ExtractorFactory:
         """Initialize extractor factory.
         
         Args:
-            tika_server: Tika server URL
+            tika_server: Tika server URL or comma-separated list of URLs
+            tika_servers: List of Tika server URLs (alternative to tika_server)
+            use_load_balancer: Whether to use load balancing across multiple Tika instances
             tesseract_cmd: Path to tesseract executable
             ocr_lang: OCR language
             ocr_dpi: DPI for PDF rendering
@@ -27,7 +31,17 @@ class ExtractorFactory:
             ocr_oem: OCR Engine Mode (3=default, 1=neural nets LSTM only)
             ocr_psm: Page Segmentation Mode (6=default, 3=auto page segmentation)
         """
-        self.tika_extractor = TikaExtractor(tika_server=tika_server)
+        # If tika_servers is provided, it takes precedence over tika_server
+        if tika_servers:
+            # Convert list to comma-separated string for TikaExtractor
+            tika_server = ",".join(tika_servers)
+            use_load_balancer = True
+            
+        self.tika_extractor = TikaExtractor(
+            tika_server=tika_server,
+            use_load_balancer=use_load_balancer
+        )
+        
         self.ocr_extractor = OCRExtractor(
             tesseract_cmd=tesseract_cmd,
             lang=ocr_lang,
@@ -121,4 +135,12 @@ class ExtractorFactory:
                 
         except Exception as e:
             logger.error(f"Error extracting text from {file_path}: {e}")
-            raise 
+            raise
+            
+    def get_tika_stats(self) -> Dict:
+        """Get statistics from the Tika load balancer.
+        
+        Returns:
+            Dict with Tika server statistics
+        """
+        return self.tika_extractor.get_stats() 

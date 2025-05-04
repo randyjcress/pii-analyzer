@@ -285,6 +285,40 @@ def serve(port: int):
     click.echo("API server not implemented yet. Coming in future version.")
     sys.exit(0)
 
+def _create_extractor_factory(ocr_dpi: int = 300, ocr_threads: int = 0) -> ExtractorFactory:
+    """Create an extractor factory with appropriate configuration.
+    
+    Args:
+        ocr_dpi: DPI for OCR
+        ocr_threads: Number of OCR threads
+        
+    Returns:
+        Configured ExtractorFactory instance
+    """
+    # Check for Tika server environment variables
+    tika_servers = os.environ.get("TIKA_SERVER_ENDPOINTS")
+    use_load_balancer = os.environ.get("USE_TIKA_LOAD_BALANCER", "true").lower() in ("true", "1", "yes")
+    
+    if tika_servers:
+        # Multiple Tika servers specified
+        tika_server_list = [s.strip() for s in tika_servers.split(",")]
+        logger.info(f"Using {len(tika_server_list)} Tika servers with load balancing")
+        return ExtractorFactory(
+            tika_servers=tika_server_list,
+            use_load_balancer=use_load_balancer,
+            ocr_dpi=ocr_dpi,
+            ocr_threads=ocr_threads
+        )
+    else:
+        # Single Tika server or default
+        tika_server = os.environ.get("TIKA_SERVER_ENDPOINT")
+        return ExtractorFactory(
+            tika_server=tika_server,
+            use_load_balancer=use_load_balancer,
+            ocr_dpi=ocr_dpi,
+            ocr_threads=ocr_threads
+        )
+
 def _analyze_file(
     file_path: str, 
     output_path: Optional[str], 
@@ -300,7 +334,7 @@ def _analyze_file(
     
     Args:
         file_path: Path to input file
-        output_path: Path to output file/directory
+        output_path: Path to output file
         output_format: Output format (json, text)
         entities: List of entity types to detect
         threshold: Confidence threshold
@@ -327,10 +361,7 @@ def _analyze_file(
         # Extract text from file
         console.print("Extracting text...", end="")
         extraction_start = time.time()
-        extractor = ExtractorFactory(
-            ocr_dpi=ocr_dpi,
-            ocr_threads=ocr_threads
-        )
+        extractor = _create_extractor_factory(ocr_dpi, ocr_threads)
         text, metadata = extractor.extract_text(
             file_path, 
             force_ocr=force_ocr,
@@ -338,6 +369,10 @@ def _analyze_file(
         )
         extraction_time = time.time() - extraction_start
         console.print(f" [green]Done[/green] ({extraction_time:.2f}s)")
+        
+        # Display Tika stats if available and at debug level
+        tika_stats = extractor.get_tika_stats()
+        logger.debug(f"Tika stats: {json.dumps(tika_stats)}")
         
         if not text:
             console.print("[bold red]No text extracted[/bold red]")
@@ -522,10 +557,7 @@ def _analyze_directory(
                 f.write("-" * 80 + "\n\n")
         
         # Initialize extractor once for all files
-        extractor = ExtractorFactory(
-            ocr_dpi=ocr_dpi,
-            ocr_threads=ocr_threads
-        )
+        extractor = _create_extractor_factory(ocr_dpi, ocr_threads)
         
         start_time = time.time()
         
@@ -773,10 +805,7 @@ def _redact_file(
     
     try:
         # Extract text from file
-        extractor = ExtractorFactory(
-            ocr_dpi=ocr_dpi,
-            ocr_threads=ocr_threads
-        )
+        extractor = _create_extractor_factory(ocr_dpi, ocr_threads)
         text, metadata = extractor.extract_text(file_path, force_ocr=force_ocr, max_pages=max_pages)
         
         if not text:
