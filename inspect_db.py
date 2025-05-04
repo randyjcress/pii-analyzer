@@ -11,7 +11,7 @@ import argparse
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-def inspect_database(db_path, show_processing_speed=False, time_window=30):
+def inspect_database(db_path, show_processing_speed=False, time_window=30, review_errors=False):
     """Inspect database and print relevant information"""
     if not os.path.exists(db_path):
         print(f"Error: Database file {db_path} not found")
@@ -97,6 +97,10 @@ def inspect_database(db_path, show_processing_speed=False, time_window=30):
         if job_ids:
             for job_id in job_ids:
                 print(f"sqlite3 {db_path} \"INSERT INTO job_metadata (job_id, key, value) VALUES ({job_id}, 'directory', '/CoWS/');\"")
+    
+    # Analyze error files if requested
+    if review_errors:
+        analyze_error_files(conn)
     
     # Processing speed statistics
     if show_processing_speed:
@@ -257,6 +261,152 @@ def inspect_database(db_path, show_processing_speed=False, time_window=30):
     
     conn.close()
 
+def analyze_error_files(conn):
+    """
+    Analyze files with error status to categorize common error patterns
+    
+    Args:
+        conn: SQLite database connection
+    """
+    print("\n=== ERROR FILE ANALYSIS ===")
+    
+    cursor = conn.cursor()
+    
+    # Get count of error files
+    cursor.execute("SELECT COUNT(*) as count FROM files WHERE status = 'error'")
+    error_count = cursor.fetchone()['count']
+    print(f"Total error files: {error_count}")
+    
+    if error_count == 0:
+        print("No error files to analyze")
+        return
+    
+    # Query error files with their error messages
+    cursor.execute("""
+    SELECT f.file_id, f.file_path, f.file_size, f.error_message, f.job_id
+    FROM files f
+    WHERE f.status = 'error'
+    ORDER BY f.file_path
+    """)
+    
+    error_files = cursor.fetchall()
+    
+    # Error categories to track
+    categories = {
+        'temp_files': 0,          # Temporary files (starting with ~$)
+        'empty_files': 0,         # Empty or zero-byte files
+        'missing_files': 0,       # Files not found at path
+        'permission_errors': 0,   # Permission denied errors
+        'format_errors': 0,       # File format not recognized or corrupt
+        'tika_errors': 0,         # Tika server errors
+        'ocr_errors': 0,          # OCR processing errors
+        'timeout_errors': 0,      # Timeouts
+        'extraction_errors': 0,   # Text extraction errors
+        'other': 0                # Uncategorized errors
+    }
+    
+    # File extension statistics for error files
+    ext_stats = defaultdict(int)
+    
+    # Error message patterns for categorization
+    temp_file_pattern = "~$"
+    empty_file_patterns = ["empty", "no output file", "zero", "0 bytes"]
+    missing_file_patterns = ["not found", "no such file", "does not exist"]
+    permission_patterns = ["permission denied", "access denied"]
+    format_patterns = ["unsupported", "invalid format", "format error", "corrupt"]
+    tika_patterns = ["tika", "connection refused", "service unavailable"]
+    ocr_patterns = ["ocr", "tesseract", "recognition failed"]
+    timeout_patterns = ["timeout", "timed out", "time limit"]
+    extraction_patterns = ["extraction failed", "could not extract", "no text"]
+    
+    # Sample error messages for each category
+    error_samples = {k: [] for k in categories.keys()}
+    max_samples = 5  # number of sample error messages to store per category
+    
+    for file in error_files:
+        file_path = file['file_path']
+        file_size = file['file_size'] or 0
+        error_msg = file['error_message'] or ""
+        
+        # Get file extension for stats
+        _, ext = os.path.splitext(file_path)
+        ext = ext.lower()
+        ext_stats[ext] += 1
+        
+        # Check for temporary Office files
+        if os.path.basename(file_path).startswith("~$"):
+            categories['temp_files'] += 1
+            if len(error_samples['temp_files']) < max_samples:
+                error_samples['temp_files'].append((file_path, error_msg))
+            continue
+        
+        # Categorize based on error message
+        error_lower = error_msg.lower()
+        
+        if file_size == 0 or any(p in error_lower for p in empty_file_patterns):
+            categories['empty_files'] += 1
+            if len(error_samples['empty_files']) < max_samples:
+                error_samples['empty_files'].append((file_path, error_msg))
+        elif any(p in error_lower for p in missing_file_patterns):
+            categories['missing_files'] += 1
+            if len(error_samples['missing_files']) < max_samples:
+                error_samples['missing_files'].append((file_path, error_msg))
+        elif any(p in error_lower for p in permission_patterns):
+            categories['permission_errors'] += 1
+            if len(error_samples['permission_errors']) < max_samples:
+                error_samples['permission_errors'].append((file_path, error_msg))
+        elif any(p in error_lower for p in format_patterns):
+            categories['format_errors'] += 1
+            if len(error_samples['format_errors']) < max_samples:
+                error_samples['format_errors'].append((file_path, error_msg))
+        elif any(p in error_lower for p in tika_patterns):
+            categories['tika_errors'] += 1
+            if len(error_samples['tika_errors']) < max_samples:
+                error_samples['tika_errors'].append((file_path, error_msg))
+        elif any(p in error_lower for p in ocr_patterns):
+            categories['ocr_errors'] += 1
+            if len(error_samples['ocr_errors']) < max_samples:
+                error_samples['ocr_errors'].append((file_path, error_msg))
+        elif any(p in error_lower for p in timeout_patterns):
+            categories['timeout_errors'] += 1
+            if len(error_samples['timeout_errors']) < max_samples:
+                error_samples['timeout_errors'].append((file_path, error_msg))
+        elif any(p in error_lower for p in extraction_patterns):
+            categories['extraction_errors'] += 1
+            if len(error_samples['extraction_errors']) < max_samples:
+                error_samples['extraction_errors'].append((file_path, error_msg))
+        else:
+            categories['other'] += 1
+            if len(error_samples['other']) < max_samples:
+                error_samples['other'].append((file_path, error_msg))
+    
+    # Print error category statistics
+    print("\nError Categories:")
+    for category, count in categories.items():
+        if count > 0:
+            percentage = (count / error_count) * 100
+            print(f"  {category.replace('_', ' ').title()}: {count} ({percentage:.1f}%)")
+    
+    # Print file extension statistics for errors
+    print("\nFile Extensions with Errors:")
+    total_ext = sum(ext_stats.values())
+    for ext, count in sorted(ext_stats.items(), key=lambda x: x[1], reverse=True)[:20]:  # Top 20
+        if count > 0:
+            percentage = (count / total_ext) * 100
+            print(f"  {ext or '(no extension)'}: {count} ({percentage:.1f}%)")
+    
+    # Print sample error messages for each category
+    print("\nSample Error Messages by Category:")
+    for category, samples in error_samples.items():
+        if samples:
+            print(f"\n  {category.replace('_', ' ').title()}:")
+            for i, (file_path, error_msg) in enumerate(samples[:max_samples]):
+                # Truncate long paths and messages
+                trunc_path = (file_path[:60] + '...') if len(file_path) > 60 else file_path
+                trunc_msg = (error_msg[:100] + '...') if len(error_msg) > 100 else error_msg
+                print(f"    Sample {i+1}: {trunc_path}")
+                print(f"      Error: {trunc_msg}")
+
 def main():
     parser = argparse.ArgumentParser(description="Inspect PII Analyzer database")
     parser.add_argument('--db-path', type=str, default='pii_results.db',
@@ -265,9 +415,11 @@ def main():
                       help='Show processing speed statistics')
     parser.add_argument('--time-window', type=int, default=30,
                       help='Time window in minutes for recent statistics (default: 30)')
+    parser.add_argument('--review-errors', action='store_true',
+                      help='Analyze error files to identify patterns and categorize errors')
     args = parser.parse_args()
     
-    inspect_database(args.db_path, args.show_speed, args.time_window)
+    inspect_database(args.db_path, args.show_speed, args.time_window, args.review_errors)
 
 if __name__ == "__main__":
     main() 
