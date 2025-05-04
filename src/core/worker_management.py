@@ -31,16 +31,22 @@ thread_local = threading.local()
 OCR_SEMAPHORE = None
 
 # Target CPU utilization (percentage)
-TARGET_CPU_UTILIZATION = 85  # Aim for 85% CPU utilization
-MIN_CPU_UTILIZATION = 70     # Minimum acceptable CPU utilization
-MAX_CPU_UTILIZATION = 95     # Maximum acceptable CPU utilization
+TARGET_CPU_UTILIZATION = 70  # Reduced from 85% to 70%
+MIN_CPU_UTILIZATION = 60     # Adjusted down to match new target
+MAX_CPU_UTILIZATION = 80     # Reduced from 95% to 80%
 
 # Dynamic scaling parameters
-MAX_BATCH_SIZE = 200         # Maximum batch size
+MAX_BATCH_SIZE = 100         # Reduced from 200 to 100
 MIN_BATCH_SIZE = 50          # Minimum batch size
 SCALING_INTERVAL = 60        # Check utilization every 60 seconds
-WORKER_STEP_SIZE = 20        # Increase/decrease workers by this amount
+WORKER_STEP_SIZE = 20        # Normal worker adjustment step
+WORKER_EMERGENCY_REDUCTION = 50  # Larger reduction when system is overloaded
 BATCH_STEP_SIZE = 25         # Increase/decrease batch size by this amount
+
+# Load average thresholds (relative to CPU count)
+# For a 96-core system, MAX_LOAD_FACTOR of 1.5 means alert at load avg > 144
+MAX_LOAD_FACTOR = 1.5        # Maximum acceptable load average as a factor of CPU count
+CRITICAL_LOAD_FACTOR = 2.0   # Critical load threshold that triggers emergency measures
 
 def get_thread_db(db_path: str) -> PIIDatabase:
     """
@@ -86,18 +92,32 @@ def get_system_utilization() -> Dict[str, float]:
     Get current system utilization metrics.
     
     Returns:
-        Dictionary with CPU and memory utilization percentages
+        Dictionary with CPU and memory utilization percentages and load average
     """
-    # Get CPU utilization (averaged over 3 seconds for stability)
+    # Get CPU utilization (averaged over 0.5 seconds for faster response)
     cpu_percent = psutil.cpu_percent(interval=0.5)
     
     # Get memory utilization
     memory = psutil.virtual_memory()
     memory_percent = memory.percent
     
+    # Get system load average
+    load_avg = os.getloadavg()
+    
+    # Get CPU count for load average context
+    cpu_count = psutil.cpu_count(logical=True)
+    
+    # Calculate load factor (load average relative to CPU count)
+    load_factor_1min = load_avg[0] / cpu_count if cpu_count else 0
+    
     return {
         'cpu_percent': cpu_percent,
-        'memory_percent': memory_percent
+        'memory_percent': memory_percent,
+        'load_avg_1min': load_avg[0],
+        'load_avg_5min': load_avg[1],
+        'load_avg_15min': load_avg[2],
+        'cpu_count': cpu_count,
+        'load_factor': load_factor_1min
     }
 
 def calculate_optimal_workers(current_workers: Optional[int] = None, utilization_info: Optional[Dict[str, float]] = None) -> int:
@@ -121,9 +141,26 @@ def calculate_optimal_workers(current_workers: Optional[int] = None, utilization
         if current_workers is not None and utilization_info is not None:
             current_cpu = utilization_info.get('cpu_percent', 0)
             current_memory = utilization_info.get('memory_percent', 0)
+            current_load_factor = utilization_info.get('load_factor', 0)
             
-            # If we're below target CPU utilization, increase workers
-            if current_cpu < MIN_CPU_UTILIZATION and current_memory < 80:
+            # Check for critical system load - emergency reduction
+            if current_load_factor > CRITICAL_LOAD_FACTOR:
+                # Aggressive reduction to quickly relieve system pressure
+                reduction = min(WORKER_EMERGENCY_REDUCTION, current_workers // 3)
+                new_workers = max(32, current_workers - reduction)
+                logger.warning(f"CRITICAL SYSTEM LOAD: Load factor {current_load_factor:.2f} exceeds threshold {CRITICAL_LOAD_FACTOR}. Aggressively reducing workers from {current_workers} to {new_workers}")
+                return new_workers
+                
+            # Check for high system load - standard reduction
+            if current_load_factor > MAX_LOAD_FACTOR:
+                # Standard reduction to relieve system pressure
+                reduction = min(WORKER_STEP_SIZE * 2, current_workers // 5)
+                new_workers = max(32, current_workers - reduction)
+                logger.warning(f"HIGH SYSTEM LOAD: Load factor {current_load_factor:.2f} exceeds threshold {MAX_LOAD_FACTOR}. Reducing workers from {current_workers} to {new_workers}")
+                return new_workers
+            
+            # If we're below target CPU utilization and system load is acceptable, increase workers
+            if current_cpu < MIN_CPU_UTILIZATION and current_memory < 80 and current_load_factor < 0.8:
                 # Increase gradually to avoid overshooting
                 adjustment = WORKER_STEP_SIZE
                 new_workers = current_workers + adjustment
@@ -145,14 +182,14 @@ def calculate_optimal_workers(current_workers: Optional[int] = None, utilization
         
         # For 96-core high-memory systems, optimize for maximum parallelism
         if cpu_count >= 96:
-            # Use 90% of available cores on these high-end systems
-            base_workers = int(cpu_count * 0.9)
+            # Use 70% of available cores (reduced from 90% to be more conservative)
+            base_workers = int(cpu_count * 0.7)
             
             # Calculate workers based on memory (assume ~500MB per worker)
             max_by_memory = int((memory_gb * 0.9) / 0.5)
             
-            # Ensure we use at least 350 workers on high-end systems
-            optimal_workers = min(max(350, base_workers), max_by_memory)
+            # Ensure we use at least 256 workers on high-end systems (reduced from 350)
+            optimal_workers = min(max(256, base_workers), max_by_memory)
             
             logger.info(f"High-end system detected. Using {optimal_workers} workers (CPU: {cpu_count}, Memory: {memory_gb:.1f}GB)")
             return optimal_workers
@@ -265,9 +302,19 @@ def process_files_parallel(
                 utilization = get_system_utilization()
                 cpu_percent = utilization['cpu_percent']
                 memory_percent = utilization['memory_percent']
+                load_factor = utilization.get('load_factor', 0)
+                load_avg_1min = utilization.get('load_avg_1min', 0)
                 
                 # Log current utilization
-                logger.info(f"Current utilization - CPU: {cpu_percent:.1f}%, Memory: {memory_percent:.1f}%, Workers: {current_max_workers}, Batch size: {current_batch_size}")
+                logger.info(f"Current utilization - CPU: {cpu_percent:.1f}%, Memory: {memory_percent:.1f}%, Load avg: {load_avg_1min:.2f} (factor: {load_factor:.2f}), Workers: {current_max_workers}, Batch size: {current_batch_size}")
+                
+                # Emergency check for critical system load
+                if load_factor > CRITICAL_LOAD_FACTOR:
+                    # Immediately reduce batch size to minimum
+                    if current_batch_size > MIN_BATCH_SIZE:
+                        logger.warning(f"CRITICAL LOAD DETECTED ({load_avg_1min:.2f}), reducing batch size to minimum {MIN_BATCH_SIZE}")
+                        current_batch_size = MIN_BATCH_SIZE
+                        scaling_stats['batch_decreases'] += 1
                 
                 # Adjust workers if needed
                 new_workers = calculate_optimal_workers(current_max_workers, utilization)
@@ -281,15 +328,15 @@ def process_files_parallel(
                         scaling_stats['worker_decreases'] += 1
                     current_max_workers = new_workers
                 
-                # Adjust batch size based on CPU utilization
-                if cpu_percent < MIN_CPU_UTILIZATION and memory_percent < 80:
+                # Adjust batch size based on CPU utilization and load
+                if load_factor < 0.8 and cpu_percent < MIN_CPU_UTILIZATION and memory_percent < 80:
                     # Increase batch size to process more files at once
                     new_batch_size = min(MAX_BATCH_SIZE, current_batch_size + BATCH_STEP_SIZE)
                     if new_batch_size != current_batch_size:
                         logger.info(f"Increasing batch size from {current_batch_size} to {new_batch_size}")
                         current_batch_size = new_batch_size
                         scaling_stats['batch_increases'] += 1
-                elif cpu_percent > MAX_CPU_UTILIZATION or memory_percent > 90:
+                elif load_factor > MAX_LOAD_FACTOR or cpu_percent > MAX_CPU_UTILIZATION or memory_percent > 90:
                     # Decrease batch size to reduce system pressure
                     new_batch_size = max(MIN_BATCH_SIZE, current_batch_size - BATCH_STEP_SIZE)
                     if new_batch_size != current_batch_size:
