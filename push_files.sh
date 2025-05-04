@@ -6,6 +6,7 @@
 DEST_SERVER="user@azure-vm-ip"  # CHANGE THIS to the Azure VM's IP/hostname and user
 SOURCE_DIR="/path/to/source"    # Local source directory
 DEST_DIR="/mnt/data/input"      # Destination directory on Azure VM
+SSH_OPTS="-o ControlMaster=auto -o ControlPath=/tmp/ssh_mux_%h_%p_%r -o ControlPersist=1h"
 
 # Default extensions that can be processed by PII analyzer
 EXTENSIONS=(
@@ -108,12 +109,19 @@ push_files() {
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
   LOG_FILE="transfer_log_$TIMESTAMP.txt"
   
-  # Create destination directory structure on remote server
-  echo "Creating directory structure on remote server..."
+  # Extract unique directories to create on remote server
+  echo "Extracting unique directories to create..."
+  DIRS_FILE=$(mktemp)
   cat "$TMP_FILE" | while read FILE; do
     DIR=$(dirname "$FILE" | sed "s|$SOURCE_DIR||")
-    ssh "$DEST_SERVER" "mkdir -p \"$DEST_DIR$DIR\""
+    echo "$DEST_DIR$DIR" >> "$DIRS_FILE"
   done
+  sort -u "$DIRS_FILE" > "${DIRS_FILE}.sorted"
+  
+  # Create all directories in one SSH session
+  echo "Creating directory structure on remote server (this may take a while)..."
+  ssh $SSH_OPTS "$DEST_SERVER" "cat > /tmp/dirs_to_create.$$.txt" < "${DIRS_FILE}.sorted"
+  ssh $SSH_OPTS "$DEST_SERVER" "xargs -I{} mkdir -p {} < /tmp/dirs_to_create.$$.txt && rm /tmp/dirs_to_create.$$.txt"
   
   # Transfer files
   echo "Starting file transfer..."
@@ -129,7 +137,7 @@ push_files() {
     
     # Copy the file (push from local to remote)
     echo "Copying $FILE to $DEST_SERVER:$DEST_PATH"
-    scp "$FILE" "$DEST_SERVER:$DEST_PATH" >> "$LOG_FILE" 2>&1
+    scp $SSH_OPTS "$FILE" "$DEST_SERVER:$DEST_PATH" >> "$LOG_FILE" 2>&1
     
     # Update batch counter
     BATCH=$((BATCH + 1))
@@ -142,7 +150,10 @@ push_files() {
   echo "Log file: $LOG_FILE"
   
   # Clean up
-  rm "$TMP_FILE"
+  rm "$TMP_FILE" "$DIRS_FILE" "${DIRS_FILE}.sorted"
+  
+  # Close SSH control connection
+  ssh $SSH_OPTS -O exit "$DEST_SERVER" 2>/dev/null
 }
 
 # Confirm before proceeding
