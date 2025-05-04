@@ -30,6 +30,18 @@ thread_local = threading.local()
 # Will be initialized during process_files_parallel
 OCR_SEMAPHORE = None
 
+# Target CPU utilization (percentage)
+TARGET_CPU_UTILIZATION = 85  # Aim for 85% CPU utilization
+MIN_CPU_UTILIZATION = 70     # Minimum acceptable CPU utilization
+MAX_CPU_UTILIZATION = 95     # Maximum acceptable CPU utilization
+
+# Dynamic scaling parameters
+MAX_BATCH_SIZE = 200         # Maximum batch size
+MIN_BATCH_SIZE = 50          # Minimum batch size
+SCALING_INTERVAL = 60        # Check utilization every 60 seconds
+WORKER_STEP_SIZE = 20        # Increase/decrease workers by this amount
+BATCH_STEP_SIZE = 25         # Increase/decrease batch size by this amount
+
 def get_thread_db(db_path: str) -> PIIDatabase:
     """
     Get a thread-local database connection.
@@ -69,11 +81,34 @@ class SafeQueue:
         with self.lock:
             return self.processed, self.errors
 
-def calculate_optimal_workers() -> int:
+def get_system_utilization() -> Dict[str, float]:
+    """
+    Get current system utilization metrics.
+    
+    Returns:
+        Dictionary with CPU and memory utilization percentages
+    """
+    # Get CPU utilization (averaged over 3 seconds for stability)
+    cpu_percent = psutil.cpu_percent(interval=0.5)
+    
+    # Get memory utilization
+    memory = psutil.virtual_memory()
+    memory_percent = memory.percent
+    
+    return {
+        'cpu_percent': cpu_percent,
+        'memory_percent': memory_percent
+    }
+
+def calculate_optimal_workers(current_workers: Optional[int] = None, utilization_info: Optional[Dict[str, float]] = None) -> int:
     """
     Calculate the optimal number of worker processes based on system resources.
-    Considers CPU cores, memory, and whether running on an NFS/networked storage.
+    If current_workers and utilization_info are provided, will adjust based on current performance.
     
+    Args:
+        current_workers: Current number of workers (if already running)
+        utilization_info: Current system utilization metrics
+        
     Returns:
         Optimal number of worker processes
     """
@@ -82,13 +117,31 @@ def calculate_optimal_workers() -> int:
         cpu_count = psutil.cpu_count(logical=True)
         memory_gb = psutil.virtual_memory().total / (1024 * 1024 * 1024)
         
-        # Check if we're accessing network storage
-        # This is a simplified check - might need adjustment
-        is_network_storage = False
-        for part in psutil.disk_partitions(all=True):
-            if 'nfs' in part.fstype.lower() or 'cifs' in part.fstype.lower():
-                is_network_storage = True
-                break
+        # If we have current utilization data and workers, use it to adjust
+        if current_workers is not None and utilization_info is not None:
+            current_cpu = utilization_info.get('cpu_percent', 0)
+            current_memory = utilization_info.get('memory_percent', 0)
+            
+            # If we're below target CPU utilization, increase workers
+            if current_cpu < MIN_CPU_UTILIZATION and current_memory < 80:
+                # Increase gradually to avoid overshooting
+                adjustment = WORKER_STEP_SIZE
+                new_workers = current_workers + adjustment
+                logger.info(f"CPU utilization {current_cpu}% is below target {TARGET_CPU_UTILIZATION}%, increasing workers from {current_workers} to {new_workers}")
+                return new_workers
+                
+            # If we're above max CPU utilization or memory pressure, decrease workers
+            elif current_cpu > MAX_CPU_UTILIZATION or current_memory > 90:
+                # Decrease to avoid system overload
+                adjustment = WORKER_STEP_SIZE
+                new_workers = max(32, current_workers - adjustment)
+                logger.info(f"System pressure detected (CPU: {current_cpu}%, Memory: {current_memory}%), decreasing workers from {current_workers} to {new_workers}")
+                return new_workers
+                
+            # If we're within acceptable range, maintain current workers
+            else:
+                logger.debug(f"Current CPU utilization {current_cpu}% is in acceptable range, maintaining {current_workers} workers")
+                return current_workers
         
         # For 96-core high-memory systems, optimize for maximum parallelism
         if cpu_count >= 96:
@@ -145,7 +198,8 @@ def process_files_parallel(
     batch_size: int = 100,  # Increased from 10 to 100
     max_files: Optional[int] = None,
     settings: Optional[Dict[str, Any]] = None,
-    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    enable_dynamic_scaling: bool = True  # Enable dynamic scaling by default
 ) -> Dict[str, Any]:
     """
     Process files in parallel using database to track progress.
@@ -159,6 +213,7 @@ def process_files_parallel(
         max_files: Maximum number of files to process (None for all)
         settings: Additional settings to pass to processing function
         progress_callback: Optional callback function to report progress
+        enable_dynamic_scaling: Whether to dynamically adjust workers and batch size
         
     Returns:
         Dictionary with processing statistics
@@ -188,12 +243,65 @@ def process_files_parallel(
     logger.info(f"System info: {cpu_count} CPU cores, {memory_gb:.1f}GB memory")
     logger.info(f"Starting parallel processing with {max_workers} worker processes and batch size {batch_size}")
     
+    # Initialize scaling variables
+    current_batch_size = batch_size
+    current_max_workers = max_workers
+    last_scaling_check = time.time()
+    scaling_stats = {
+        'adjustments': 0,
+        'worker_increases': 0,
+        'worker_decreases': 0,
+        'batch_increases': 0,
+        'batch_decreases': 0
+    }
+    
     # Create a process pool with fixed number of workers
     # Use ProcessPoolExecutor for true parallelism
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         while files_remaining and (max_files is None or processed_count < max_files):
-            # Get batch of pending files
-            limit = min(batch_size, max_files - processed_count if max_files else batch_size)
+            # Dynamic scaling: periodically check and adjust resources
+            if enable_dynamic_scaling and time.time() - last_scaling_check > SCALING_INTERVAL:
+                # Check current CPU and memory utilization
+                utilization = get_system_utilization()
+                cpu_percent = utilization['cpu_percent']
+                memory_percent = utilization['memory_percent']
+                
+                # Log current utilization
+                logger.info(f"Current utilization - CPU: {cpu_percent:.1f}%, Memory: {memory_percent:.1f}%, Workers: {current_max_workers}, Batch size: {current_batch_size}")
+                
+                # Adjust workers if needed
+                new_workers = calculate_optimal_workers(current_max_workers, utilization)
+                if new_workers != current_max_workers:
+                    # We can't change the pool size dynamically, but we'll use this for the next batch
+                    logger.info(f"Adjusting worker count from {current_max_workers} to {new_workers} for next execution")
+                    scaling_stats['adjustments'] += 1
+                    if new_workers > current_max_workers:
+                        scaling_stats['worker_increases'] += 1
+                    else:
+                        scaling_stats['worker_decreases'] += 1
+                    current_max_workers = new_workers
+                
+                # Adjust batch size based on CPU utilization
+                if cpu_percent < MIN_CPU_UTILIZATION and memory_percent < 80:
+                    # Increase batch size to process more files at once
+                    new_batch_size = min(MAX_BATCH_SIZE, current_batch_size + BATCH_STEP_SIZE)
+                    if new_batch_size != current_batch_size:
+                        logger.info(f"Increasing batch size from {current_batch_size} to {new_batch_size}")
+                        current_batch_size = new_batch_size
+                        scaling_stats['batch_increases'] += 1
+                elif cpu_percent > MAX_CPU_UTILIZATION or memory_percent > 90:
+                    # Decrease batch size to reduce system pressure
+                    new_batch_size = max(MIN_BATCH_SIZE, current_batch_size - BATCH_STEP_SIZE)
+                    if new_batch_size != current_batch_size:
+                        logger.info(f"Decreasing batch size from {current_batch_size} to {new_batch_size}")
+                        current_batch_size = new_batch_size
+                        scaling_stats['batch_decreases'] += 1
+                
+                # Update last check time
+                last_scaling_check = time.time()
+            
+            # Get batch of pending files using current batch size
+            limit = min(current_batch_size, max_files - processed_count if max_files else current_batch_size)
             pending_files = db.get_pending_files(job_id, limit=limit)
             
             if not pending_files:
@@ -285,11 +393,17 @@ def process_files_parallel(
             mem = psutil.virtual_memory()
             if mem.percent > 90:
                 logger.warning(f"Memory pressure detected ({mem.percent}% used), reducing batch size")
-                batch_size = max(50, batch_size // 2)  # Maintain minimum batch size of 50
+                current_batch_size = max(MIN_BATCH_SIZE, current_batch_size // 2)  # Maintain minimum batch size of 50
     
     # Update job status
     elapsed = time.time() - start_time
     rate = processed_count / elapsed if elapsed > 0 else 0
+    
+    # Log scaling statistics
+    if enable_dynamic_scaling:
+        logger.info(f"Dynamic scaling summary: Total adjustments: {scaling_stats['adjustments']}")
+        logger.info(f"Worker increases: {scaling_stats['worker_increases']}, Worker decreases: {scaling_stats['worker_decreases']}")
+        logger.info(f"Batch increases: {scaling_stats['batch_increases']}, Batch decreases: {scaling_stats['batch_decreases']}")
     
     if not files_remaining:
         db.update_job_status(job_id, 'completed')
@@ -303,7 +417,8 @@ def process_files_parallel(
         'errors': error_count,
         'elapsed': elapsed,
         'rate': rate,
-        'status': 'completed' if not files_remaining else 'interrupted'
+        'status': 'completed' if not files_remaining else 'interrupted',
+        'scaling_stats': scaling_stats if enable_dynamic_scaling else {}
     }
 
 def process_single_file_process_safe(
