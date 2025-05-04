@@ -91,24 +91,22 @@ def calculate_optimal_workers() -> int:
                 break
         
         # Calculate base worker count based on CPU
-        # Use 75% of available cores, minimum 2
-        base_workers = max(2, int(cpu_count * 0.75))
+        # Use 90% of available cores
+        base_workers = max(2, int(cpu_count * 0.9))
         
         # Adjust based on memory - each worker might use ~500MB
-        # Allow up to 80% of system memory for workers
-        max_by_memory = int((memory_gb * 0.8) / 0.5)
+        # Allow up to 90% of system memory for workers
+        max_by_memory = int((memory_gb * 0.9) / 0.5)
         
         # Take the minimum to avoid oversubscription
         optimal_workers = min(base_workers, max_by_memory)
         
-        # If using network storage, limit more aggressively to avoid I/O bottlenecks
-        if is_network_storage:
-            network_adjusted = max(2, int(optimal_workers * 0.7))
-            logger.info(f"Network storage detected, reducing workers from {optimal_workers} to {network_adjusted}")
-            optimal_workers = network_adjusted
-        
-        # Cap at 32 workers maximum regardless of hardware
-        optimal_workers = min(optimal_workers, 32)
+        # For high-end systems, allow more aggressive worker counts
+        if cpu_count >= 32:
+            # For 32+ CPU systems, ensure we can use at least 256 workers
+            # on systems with sufficient memory
+            min_workers_high_end = min(256, int(memory_gb / 2))
+            optimal_workers = max(optimal_workers, min_workers_high_end)
         
         logger.info(f"Calculated optimal workers: {optimal_workers} (CPU: {cpu_count}, Memory: {memory_gb:.1f}GB)")
         return optimal_workers

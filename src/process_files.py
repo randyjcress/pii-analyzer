@@ -127,7 +127,7 @@ Examples:
                         help='Skip directory scanning when resuming (use existing files in database)')
     parser.add_argument('--workers', type=int, default=None,
                         help='Number of worker processes (default: auto)')
-    parser.add_argument('--batch-size', type=int, default=10,
+    parser.add_argument('--batch-size', type=int, default=50,
                         help='Number of files to process in a batch')
     parser.add_argument('--max-files', type=int, default=None,
                         help='Maximum number of files to process')
@@ -155,8 +155,8 @@ Examples:
                         help='Force OCR for text extraction')
     parser.add_argument('--ocr-dpi', type=int, default=300,
                         help='DPI for OCR')
-    parser.add_argument('--ocr-threads', type=int, default=1,
-                        help='Number of OCR threads per file (default: 1)')
+    parser.add_argument('--ocr-threads', type=int, default=2,
+                        help='Number of OCR threads per file (default: 2)')
     parser.add_argument('--max-ocr', type=int, default=None, 
                         help='Maximum number of concurrent OCR processes (default: auto)')
     parser.add_argument('--max-pages', type=int, default=None,
