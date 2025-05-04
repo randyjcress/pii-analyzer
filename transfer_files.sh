@@ -4,7 +4,7 @@
 
 # Set source and destination
 SOURCE_SERVER="user@original-server-ip"  # CHANGE THIS to the original server's IP/hostname and user
-SOURCE_DIR="/CoWS"
+SOURCE_DIR="/path/to/source"
 DEST_DIR="/mnt/data/input"
 
 # Default extensions that can be processed by PII analyzer
@@ -31,7 +31,7 @@ show_help() {
   echo "  -e, --extensions LIST   Comma-separated list of extensions to transfer"
   echo "  -h, --help              Show this help message"
   echo ""
-  echo "Example: $0 --server user@192.168.1.100 --source-dir /CoWS --dest-dir /mnt/data/input"
+  echo "Example: $0 --server user@192.168.1.100 --source-dir /path/to/source --dest-dir /mnt/data/input"
   echo ""
 }
 
