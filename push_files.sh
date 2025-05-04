@@ -3,9 +3,9 @@
 # to the Azure VM while preserving directory structure
 
 # Set source and destination
-DEST_SERVER="user@azure-vm-ip"  # CHANGE THIS to the Azure VM's IP/hostname and user
-SOURCE_DIR="/path/to/source"    # Local source directory
-DEST_DIR="/mnt/data/input"      # Destination directory on Azure VM
+DEST_SERVER="piiadmin@20.169.240.64"  # Your Azure VM
+SOURCE_DIR="/CoWS"                    # Your actual source directory 
+DEST_DIR="/mnt/data/input"            # Destination directory on Azure VM
 SSH_OPTS="-o ControlMaster=auto -o ControlPath=/tmp/ssh_mux_%h_%p_%r -o ControlPersist=1h"
 
 # Default extensions that can be processed by PII analyzer
@@ -94,66 +94,32 @@ echo "============================="
 
 # Function to push files in batches
 push_files() {
-  echo "Getting list of files to transfer..."
-  # Create a temporary file to store the list of files
-  TMP_FILE=$(mktemp)
+  echo "Getting list of extensions to process..."
   
-  # Run the find command locally and save the output
-  eval "$FIND_EXPR" > "$TMP_FILE"
-  
-  # Count total files
-  TOTAL_FILES=$(wc -l < "$TMP_FILE")
-  echo "Found $TOTAL_FILES files to transfer"
+  # Build rsync include/exclude patterns
+  RSYNC_PATTERNS=""
+  for ext in "${EXTENSIONS[@]}"; do
+    RSYNC_PATTERNS+=" --include=*.${ext}"
+  done
   
   # Create a timestamp for the transfer log
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
   LOG_FILE="transfer_log_$TIMESTAMP.txt"
   
-  # Extract unique directories to create on remote server
-  echo "Extracting unique directories to create..."
-  DIRS_FILE=$(mktemp)
-  cat "$TMP_FILE" | while read FILE; do
-    DIR=$(dirname "$FILE" | sed "s|$SOURCE_DIR||")
-    echo "$DEST_DIR$DIR" >> "$DIRS_FILE"
-  done
-  sort -u "$DIRS_FILE" > "${DIRS_FILE}.sorted"
+  # Create the base destination directory
+  echo "Creating base destination directory..."
+  ssh $SSH_OPTS "$DEST_SERVER" "mkdir -p $DEST_DIR"
   
-  # Create all directories in one SSH session
-  echo "Creating directory structure on remote server (this may take a while)..."
-  ssh $SSH_OPTS "$DEST_SERVER" "cat > /tmp/dirs_to_create.$$.txt" < "${DIRS_FILE}.sorted"
-  ssh $SSH_OPTS "$DEST_SERVER" "xargs -I{} mkdir -p {} < /tmp/dirs_to_create.$$.txt && rm /tmp/dirs_to_create.$$.txt"
-  
-  # Transfer files
-  echo "Starting file transfer..."
-  BATCH_SIZE=1000
-  BATCH=0
-  TOTAL_BATCHES=$((($TOTAL_FILES + $BATCH_SIZE - 1) / $BATCH_SIZE))
-  
-  cat "$TMP_FILE" | while read -r FILE; do
-    # Get file path relative to SOURCE_DIR
-    REL_PATH="${FILE#$SOURCE_DIR/}"
-    # Determine destination path
-    DEST_PATH="$DEST_DIR/$REL_PATH"
+  # Use rsync to transfer files - much more efficient than SCP for many files
+  echo "Starting rsync transfer (this preserves directory structure)..."
+  rsync -avz --progress --stats \
+    $RSYNC_PATTERNS \
+    --include='*/' \
+    --exclude='*' \
+    "$SOURCE_DIR/" "$DEST_SERVER:$DEST_DIR/" \
+    | tee "$LOG_FILE"
     
-    # Copy the file (push from local to remote)
-    echo "Copying $FILE to $DEST_SERVER:$DEST_PATH"
-    scp $SSH_OPTS "$FILE" "$DEST_SERVER:$DEST_PATH" >> "$LOG_FILE" 2>&1
-    
-    # Update batch counter
-    BATCH=$((BATCH + 1))
-    if [ $((BATCH % 100)) -eq 0 ]; then
-      echo "Transferred $BATCH / $TOTAL_FILES files"
-    fi
-  done
-  
-  echo "Transfer complete. $BATCH files transferred."
-  echo "Log file: $LOG_FILE"
-  
-  # Clean up
-  rm "$TMP_FILE" "$DIRS_FILE" "${DIRS_FILE}.sorted"
-  
-  # Close SSH control connection
-  ssh $SSH_OPTS -O exit "$DEST_SERVER" 2>/dev/null
+  echo "Transfer complete. See $LOG_FILE for details."
 }
 
 # Confirm before proceeding
