@@ -45,7 +45,7 @@ if grep -q "TIKA_SERVER_ENDPOINTS" .env; then
     echo "TIKA_SERVER_ENDPOINTS already configured in .env"
 else
     echo "Adding TIKA_SERVER_ENDPOINTS to .env"
-    echo "TIKA_SERVER_ENDPOINTS=http://localhost:9998,http://localhost:9999,http://localhost:10000" >> .env
+    echo "TIKA_SERVER_ENDPOINTS=http://localhost:9998,http://localhost:9999,http://localhost:10000,http://localhost:10001,http://localhost:10002,http://localhost:10003" >> .env
 fi
 
 # Check if USE_TIKA_LOAD_BALANCER exists
@@ -84,6 +84,24 @@ else
     echo -e "${RED}Error: Tika3 service failed to start.${NC}"
 fi
 
+if docker-compose ps | grep -q "tika4"; then
+    echo -e "${GREEN}Tika4 service is running.${NC}"
+else
+    echo -e "${RED}Error: Tika4 service failed to start.${NC}"
+fi
+
+if docker-compose ps | grep -q "tika5"; then
+    echo -e "${GREEN}Tika5 service is running.${NC}"
+else
+    echo -e "${RED}Error: Tika5 service failed to start.${NC}"
+fi
+
+if docker-compose ps | grep -q "tika6"; then
+    echo -e "${GREEN}Tika6 service is running.${NC}"
+else
+    echo -e "${RED}Error: Tika6 service failed to start.${NC}"
+fi
+
 # Test Tika endpoints
 echo -e "${YELLOW}Testing Tika endpoints...${NC}"
 
@@ -101,9 +119,12 @@ test_tika_endpoint() {
 test_tika_endpoint "http://localhost:9998"
 test_tika_endpoint "http://localhost:9999"
 test_tika_endpoint "http://localhost:10000"
+test_tika_endpoint "http://localhost:10001"
+test_tika_endpoint "http://localhost:10002"
+test_tika_endpoint "http://localhost:10003"
 
 echo -e "${GREEN}Setup complete!${NC}"
-echo "The Tika load balancer is now configured with 3 Tika instances."
+echo "The Tika load balancer is now configured with 6 Tika instances."
 echo -e "To monitor Tika usage, check ${BLUE}docker-compose logs -f${NC} or use the monitoring script."
 echo -e "To visualize the load balancing, add ${BLUE}logger.debug(f\"Tika stats: {json.dumps(extractor.get_tika_stats())}\")${NC}"
 echo "to your code after using the extractor." 

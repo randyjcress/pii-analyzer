@@ -90,38 +90,59 @@ def calculate_optimal_workers() -> int:
                 is_network_storage = True
                 break
         
-        # Calculate base worker count based on CPU
-        # Use 90% of available cores
-        base_workers = max(2, int(cpu_count * 0.9))
+        # For 96-core high-memory systems, optimize for maximum parallelism
+        if cpu_count >= 96:
+            # Use 90% of available cores on these high-end systems
+            base_workers = int(cpu_count * 0.9)
+            
+            # Calculate workers based on memory (assume ~500MB per worker)
+            max_by_memory = int((memory_gb * 0.9) / 0.5)
+            
+            # Ensure we use at least 350 workers on high-end systems
+            optimal_workers = min(max(350, base_workers), max_by_memory)
+            
+            logger.info(f"High-end system detected. Using {optimal_workers} workers (CPU: {cpu_count}, Memory: {memory_gb:.1f}GB)")
+            return optimal_workers
         
-        # Adjust based on memory - each worker might use ~500MB
-        # Allow up to 90% of system memory for workers
-        max_by_memory = int((memory_gb * 0.9) / 0.5)
-        
-        # Take the minimum to avoid oversubscription
-        optimal_workers = min(base_workers, max_by_memory)
-        
-        # For high-end systems, allow more aggressive worker counts
-        if cpu_count >= 32:
+        # For 32-64 core systems
+        elif cpu_count >= 32:
             # For 32+ CPU systems, ensure we can use at least 256 workers
             # on systems with sufficient memory
+            base_workers = max(2, int(cpu_count * 0.9))
+            max_by_memory = int((memory_gb * 0.9) / 0.5)
             min_workers_high_end = min(256, int(memory_gb / 2))
-            optimal_workers = max(optimal_workers, min_workers_high_end)
+            optimal_workers = max(min(base_workers, max_by_memory), min_workers_high_end)
+        
+        # Standard calculation for smaller systems
+        else:
+            # Calculate base worker count based on CPU
+            # Use 90% of available cores
+            base_workers = max(2, int(cpu_count * 0.9))
+            
+            # Adjust based on memory - each worker might use ~500MB
+            # Allow up to 90% of system memory for workers
+            max_by_memory = int((memory_gb * 0.9) / 0.5)
+            
+            # Take the minimum to avoid oversubscription
+            optimal_workers = min(base_workers, max_by_memory)
         
         logger.info(f"Calculated optimal workers: {optimal_workers} (CPU: {cpu_count}, Memory: {memory_gb:.1f}GB)")
         return optimal_workers
     
     except Exception as e:
         logger.warning(f"Error calculating optimal workers: {e}, using fallback value")
-        # Fallback to conservative value
-        return 4
+        # Fallback to a more aggressive value based on CPU count if available
+        if 'cpu_count' in locals():
+            return max(32, int(cpu_count * 0.8))
+        # Conservative fallback if CPU count isn't available
+        return 32
 
 def process_files_parallel(
     db: PIIDatabase,
     job_id: int,
     processing_func: Callable[[str, Dict[str, Any]], Dict[str, Any]],
     max_workers: Optional[int] = None,
-    batch_size: int = 10,
+    batch_size: int = 100,  # Increased from 10 to 100
     max_files: Optional[int] = None,
     settings: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
@@ -165,7 +186,7 @@ def process_files_parallel(
     cpu_count = psutil.cpu_count(logical=True)
     memory_gb = psutil.virtual_memory().total / (1024 * 1024 * 1024)
     logger.info(f"System info: {cpu_count} CPU cores, {memory_gb:.1f}GB memory")
-    logger.info(f"Starting parallel processing with {max_workers} worker processes")
+    logger.info(f"Starting parallel processing with {max_workers} worker processes and batch size {batch_size}")
     
     # Create a process pool with fixed number of workers
     # Use ProcessPoolExecutor for true parallelism
@@ -264,7 +285,7 @@ def process_files_parallel(
             mem = psutil.virtual_memory()
             if mem.percent > 90:
                 logger.warning(f"Memory pressure detected ({mem.percent}% used), reducing batch size")
-                batch_size = max(1, batch_size // 2)
+                batch_size = max(50, batch_size // 2)  # Maintain minimum batch size of 50
     
     # Update job status
     elapsed = time.time() - start_time
