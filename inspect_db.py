@@ -11,7 +11,7 @@ import argparse
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-def inspect_database(db_path, show_processing_speed=False, time_window=30, review_errors=False):
+def inspect_database(db_path, show_processing_speed=False, time_window=30, review_errors=False, reset_errors=False):
     """Inspect database and print relevant information"""
     if not os.path.exists(db_path):
         print(f"Error: Database file {db_path} not found")
@@ -97,6 +97,10 @@ def inspect_database(db_path, show_processing_speed=False, time_window=30, revie
         if job_ids:
             for job_id in job_ids:
                 print(f"sqlite3 {db_path} \"INSERT INTO job_metadata (job_id, key, value) VALUES ({job_id}, 'directory', '/CoWS/');\"")
+    
+    # Reset error files if requested
+    if reset_errors:
+        reset_error_files(conn)
     
     # Analyze error files if requested
     if review_errors:
@@ -261,6 +265,85 @@ def inspect_database(db_path, show_processing_speed=False, time_window=30, revie
     
     conn.close()
 
+def reset_error_files(conn):
+    """
+    Reset files with error status back to pending so they can be reprocessed
+    
+    Args:
+        conn: SQLite database connection
+    """
+    print("\n=== RESETTING ERROR FILES ===")
+    
+    cursor = conn.cursor()
+    
+    # Get count of error files
+    cursor.execute("SELECT COUNT(*) as count FROM files WHERE status = 'error'")
+    error_count = cursor.fetchone()['count']
+    print(f"Total error files to reset: {error_count}")
+    
+    if error_count == 0:
+        print("No error files to reset")
+        return
+    
+    # Options to exclude temp files and retry specific extensions
+    exclude_temp_files = True  # Skip resetting temporary Office files (starting with ~$)
+    
+    # Optional: Allow filtering by job ID
+    # job_id = None  # Set to a specific job ID to only reset errors for that job
+    
+    # Exclude temporary files if requested
+    if exclude_temp_files:
+        # Check how many temp files exist
+        cursor.execute("""
+        SELECT COUNT(*) as count FROM files 
+        WHERE status = 'error' AND file_path LIKE '%/~$%'
+        """)
+        temp_count = cursor.fetchone()['count']
+        print(f"Excluding {temp_count} temporary Office files")
+        
+        # Reset all error files except temp files
+        cursor.execute("""
+        UPDATE files
+        SET 
+            status = 'pending',
+            process_start = NULL,
+            process_end = NULL,
+            error_message = NULL
+        WHERE status = 'error' AND file_path NOT LIKE '%/~$%'
+        """)
+        
+        reset_count = cursor.rowcount
+    else:
+        # Reset all error files
+        cursor.execute("""
+        UPDATE files
+        SET 
+            status = 'pending',
+            process_start = NULL,
+            process_end = NULL,
+            error_message = NULL
+        WHERE status = 'error'
+        """)
+        
+        reset_count = cursor.rowcount
+    
+    # Commit changes
+    conn.commit()
+    
+    # Update job stats in jobs table
+    cursor.execute("""
+    UPDATE jobs
+    SET 
+        error_files = error_files - ?,
+        processed_files = processed_files - ?
+    WHERE job_id IN (SELECT DISTINCT job_id FROM files WHERE status = 'pending')
+    """, (reset_count, reset_count))
+    
+    conn.commit()
+    
+    print(f"Successfully reset {reset_count} files from 'error' to 'pending' status")
+    print(f"These files will be reprocessed on the next run of process_files.py")
+
 def analyze_error_files(conn):
     """
     Analyze files with error status to categorize common error patterns
@@ -417,9 +500,11 @@ def main():
                       help='Time window in minutes for recent statistics (default: 30)')
     parser.add_argument('--review-errors', action='store_true',
                       help='Analyze error files to identify patterns and categorize errors')
+    parser.add_argument('--reset-errors', action='store_true',
+                      help='Reset error files back to pending status so they can be reprocessed')
     args = parser.parse_args()
     
-    inspect_database(args.db_path, args.show_speed, args.time_window, args.review_errors)
+    inspect_database(args.db_path, args.show_speed, args.time_window, args.review_errors, args.reset_errors)
 
 if __name__ == "__main__":
     main() 
