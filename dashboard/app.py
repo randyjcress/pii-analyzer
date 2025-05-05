@@ -522,8 +522,86 @@ def error_analysis_test_page():
             inspect_db.analyze_error_files(conn)
             output = buf.getvalue()
         
+        # Debug the raw output
+        logger.info(f"Raw output from analyze_error_files:\n{output}")
+        
         # Parse the output
         error_data = parse_error_analysis_output(output)
+        
+        # Debug the parsed data
+        logger.info(f"Parsed error data: {error_data['total_errors']} total errors")
+        logger.info(f"Categories parsed: {len(error_data['categories'])}")
+        logger.info(f"Extensions parsed: {len(error_data['extensions'])}")
+        
+        # Add line-by-line parsing for debugging
+        parsing_details = []
+        current_section = None
+        
+        for i, line in enumerate(output.split('\n')):
+            line_stripped = line.strip()
+            line_type = "unknown"
+            parsed_result = "Not processed"
+            
+            if not line_stripped:
+                line_type = "blank"
+                parsed_result = "Skipped (blank line)"
+            elif "Total error files:" in line_stripped:
+                line_type = "total_count"
+                parsed_result = f"Found total: {error_data['total_errors']}"
+            elif "Error Categories:" in line_stripped:
+                line_type = "category_header"
+                current_section = "categories"
+                parsed_result = "Set current_section to 'categories'"
+            elif "File Extensions with Errors:" in line_stripped:
+                line_type = "extension_header"
+                current_section = "extensions"
+                parsed_result = "Set current_section to 'extensions'"
+            elif "Sample Error Messages by Category:" in line_stripped:
+                line_type = "samples_header"
+                current_section = "samples"
+                parsed_result = "Set current_section to 'samples'"
+            elif current_section == "categories" and line_stripped.startswith("  "):
+                line_type = "potential_category_line"
+                try:
+                    # Check if it contains the expected format with colon and percentage
+                    if ":" in line_stripped and "(" in line_stripped and "%)" in line_stripped:
+                        # Split by colon to get name and value parts
+                        parts = line_stripped.split(":", 1)
+                        if len(parts) == 2:
+                            category_name = parts[0].strip()
+                            value_part = parts[1].strip()
+                            
+                            # Extract count and percentage
+                            count_parts = value_part.split(" (")
+                            if len(count_parts) == 2:
+                                count = int(count_parts[0].strip())
+                                percentage = float(count_parts[1].strip().rstrip("%)"))
+                                parsed_result = f"Category: {category_name}, Count: {count}, Percentage: {percentage}"
+                            else:
+                                parsed_result = f"Failed to split count parts: {value_part}"
+                        else:
+                            parsed_result = f"Failed to split by colon: {line_stripped}"
+                    else:
+                        parsed_result = f"Not a category line (missing : or % format): {line_stripped}"
+                except Exception as e:
+                    parsed_result = f"Error parsing: {str(e)}"
+            elif current_section == "extensions" and line_stripped.startswith("  "):
+                line_type = "potential_extension_line"
+                try:
+                    # Similar parsing check for extensions
+                    if ":" in line_stripped and "(" in line_stripped and "%)" in line_stripped:
+                        parsed_result = "Extension line format seems correct"
+                    else:
+                        parsed_result = f"Not an extension line (missing format): {line_stripped}"
+                except Exception as e:
+                    parsed_result = f"Error parsing: {str(e)}"
+            
+            parsing_details.append({
+                "line_num": i+1,
+                "line": line,
+                "type": line_type,
+                "parsed": parsed_result
+            })
         
         # Build HTML directly
         html = "<html><head><title>Error Analysis Test</title>"
@@ -591,6 +669,34 @@ def error_analysis_test_page():
                 html += "</ul>"
         else:
             html += "<div class='alert alert-warning'>No error samples available</div>"
+        
+        # Line-by-line parsing debug section
+        html += "<h2 class='mt-4'>Parsing Debug</h2>"
+        html += "<div class='table-responsive'>"
+        html += "<table class='table table-sm table-bordered'>"
+        html += "<thead><tr><th>Line #</th><th>Type</th><th>Content</th><th>Parse Result</th></tr></thead>"
+        html += "<tbody>"
+        
+        for detail in parsing_details:
+            row_class = ""
+            if "category" in detail["type"]:
+                row_class = "table-primary"
+            elif "extension" in detail["type"]:
+                row_class = "table-success"
+            elif "sample" in detail["type"]:
+                row_class = "table-info"
+            elif "error" in detail["parsed"].lower():
+                row_class = "table-danger"
+            
+            html += f"<tr class='{row_class}'>"
+            html += f"<td>{detail['line_num']}</td>"
+            html += f"<td>{detail['type']}</td>"
+            html += f"<td><pre class='mb-0'>{detail['line']}</pre></td>"
+            html += f"<td>{detail['parsed']}</td>"
+            html += "</tr>"
+        
+        html += "</tbody></table>"
+        html += "</div>"
         
         # Raw output section
         html += "<h2 class='mt-4'>Raw Output</h2>"
@@ -707,7 +813,10 @@ def parse_error_analysis_output(output: str) -> Dict[str, Any]:
     current_section = None
     current_category = None
     
-    for line in lines:
+    # Debug logging
+    logger.info(f"Parsing error analysis output with {len(lines)} lines")
+    
+    for i, line in enumerate(lines):
         line = line.strip()
         
         if not line:
@@ -718,63 +827,95 @@ def parse_error_analysis_output(output: str) -> Dict[str, Any]:
             if len(parts) == 2:
                 try:
                     result['total_errors'] = int(parts[1])
+                    logger.debug(f"Found total errors: {result['total_errors']}")
                 except ValueError:
                     logger.warning(f"Could not parse total errors from: {line}")
                     result['total_errors'] = 0
         
         elif "Error Categories:" in line:
             current_section = "categories"
+            logger.debug(f"Entering categories section at line {i+1}")
         
         elif "File Extensions with Errors:" in line:
             current_section = "extensions"
+            logger.debug(f"Entering extensions section at line {i+1}")
         
         elif "Sample Error Messages by Category:" in line:
             current_section = "samples"
+            logger.debug(f"Entering samples section at line {i+1}")
         
         elif current_section == "categories" and line.startswith("  "):
-            # Parse category lines like "  category_name: 123 (45.6%)"
+            logger.debug(f"Processing potential category line: '{line}'")
             try:
-                # Split by colon to get name and value parts
-                parts = line.split(":", 1)
-                if len(parts) == 2:
-                    category_name = parts[0].strip()
-                    value_part = parts[1].strip()
-                    
-                    # Extract count and percentage
-                    count_parts = value_part.split(" (")
-                    if len(count_parts) == 2:
-                        count = int(count_parts[0].strip())
-                        percentage = float(count_parts[1].strip().rstrip("%)"))
-                        result['categories'].append({
-                            'name': category_name,
-                            'count': count,
-                            'percentage': percentage
-                        })
-                        logger.debug(f"Parsed category: {category_name}, count: {count}, percentage: {percentage}")
-            except (ValueError, IndexError) as e:
+                # Special case for "Temp Files", "Empty Files", etc. format
+                if ":" in line and "(" in line and "%)" in line:
+                    parts = line.split(":", 1)
+                    if len(parts) == 2:
+                        category_name = parts[0].strip()
+                        value_part = parts[1].strip()
+                        
+                        # Look for the format: "123 (45.6%)"
+                        if " (" in value_part and value_part.endswith("%)"):
+                            count_parts = value_part.split(" (")
+                            if len(count_parts) == 2:
+                                try:
+                                    count = int(count_parts[0].strip())
+                                    percentage = float(count_parts[1].strip().rstrip("%)"))
+                                    
+                                    result['categories'].append({
+                                        'name': category_name,
+                                        'count': count,
+                                        'percentage': percentage
+                                    })
+                                    logger.debug(f"Successfully parsed category: {category_name}, count: {count}, percentage: {percentage}")
+                                except ValueError as e:
+                                    logger.warning(f"Error parsing numbers in category line '{line}': {e}")
+                            else:
+                                logger.warning(f"Count parts not found in expected format: {value_part}")
+                        else:
+                            logger.warning(f"Value part doesn't match expected format: {value_part}")
+                    else:
+                        logger.warning(f"Failed to split category line by colon: {line}")
+                else:
+                    logger.warning(f"Line doesn't match category format (missing : or %): {line}")
+            except Exception as e:
                 logger.warning(f"Error parsing category line '{line}': {e}")
         
         elif current_section == "extensions" and line.startswith("  "):
-            # Parse extension lines like "  .ext: 123 (45.6%)"
+            logger.debug(f"Processing potential extension line: '{line}'")
             try:
-                # Split by colon to get extension and value parts
-                parts = line.split(":", 1)
-                if len(parts) == 2:
-                    extension = parts[0].strip()
-                    value_part = parts[1].strip()
-                    
-                    # Extract count and percentage
-                    count_parts = value_part.split(" (")
-                    if len(count_parts) == 2:
-                        count = int(count_parts[0].strip())
-                        percentage = float(count_parts[1].strip().rstrip("%)"))
-                        result['extensions'].append({
-                            'extension': extension,
-                            'count': count,
-                            'percentage': percentage
-                        })
-                        logger.debug(f"Parsed extension: {extension}, count: {count}, percentage: {percentage}")
-            except (ValueError, IndexError) as e:
+                # Parse extension lines (similar to category lines)
+                if ":" in line and "(" in line and "%)" in line:
+                    parts = line.split(":", 1)
+                    if len(parts) == 2:
+                        extension = parts[0].strip()
+                        value_part = parts[1].strip()
+                        
+                        # Look for the format: "123 (45.6%)"
+                        if " (" in value_part and value_part.endswith("%)"):
+                            count_parts = value_part.split(" (")
+                            if len(count_parts) == 2:
+                                try:
+                                    count = int(count_parts[0].strip())
+                                    percentage = float(count_parts[1].strip().rstrip("%)"))
+                                    
+                                    result['extensions'].append({
+                                        'extension': extension,
+                                        'count': count,
+                                        'percentage': percentage
+                                    })
+                                    logger.debug(f"Successfully parsed extension: {extension}, count: {count}, percentage: {percentage}")
+                                except ValueError as e:
+                                    logger.warning(f"Error parsing numbers in extension line '{line}': {e}")
+                            else:
+                                logger.warning(f"Count parts not found in expected format: {value_part}")
+                        else:
+                            logger.warning(f"Value part doesn't match expected format: {value_part}")
+                    else:
+                        logger.warning(f"Failed to split extension line by colon: {line}")
+                else:
+                    logger.warning(f"Line doesn't match extension format (missing : or %): {line}")
+            except Exception as e:
                 logger.warning(f"Error parsing extension line '{line}': {e}")
         
         elif current_section == "samples" and line.startswith("  ") and not line.startswith("    "):
@@ -782,29 +923,41 @@ def parse_error_analysis_output(output: str) -> Dict[str, Any]:
             if line.endswith(":"):
                 current_category = line.strip().rstrip(":")
                 result['samples'][current_category] = []
+                logger.debug(f"Found sample category: {current_category}")
         
         elif current_section == "samples" and current_category and line.startswith("    Sample"):
             # Sample file path
-            file_parts = line.replace("Sample", "").split(": ", 1)
-            if len(file_parts) > 1:
-                file_path = file_parts[1].strip()
-                result['samples'][current_category].append({
-                    'file_path': file_path,
-                    'error': None
-                })
+            try:
+                file_parts = line.replace("Sample", "").split(": ", 1)
+                if len(file_parts) > 1:
+                    file_path = file_parts[1].strip()
+                    result['samples'][current_category].append({
+                        'file_path': file_path,
+                        'error': None
+                    })
+                    logger.debug(f"Added sample file path: {file_path}")
+            except Exception as e:
+                logger.warning(f"Error parsing sample line '{line}': {e}")
         
         elif current_section == "samples" and current_category and line.startswith("      Error:"):
             # Error message for the last sample
-            error_parts = line.split(": ", 1)
-            if len(error_parts) > 1:
-                error_msg = error_parts[1].strip()
-                if result['samples'][current_category]:
-                    result['samples'][current_category][-1]['error'] = error_msg
+            try:
+                error_parts = line.split(": ", 1)
+                if len(error_parts) > 1:
+                    error_msg = error_parts[1].strip()
+                    if result['samples'][current_category]:
+                        result['samples'][current_category][-1]['error'] = error_msg
+                        logger.debug(f"Added error message: {error_msg}")
+            except Exception as e:
+                logger.warning(f"Error parsing error message line '{line}': {e}")
     
     # Ensure we have at least empty arrays/objects for all keys
     result.setdefault('categories', [])
     result.setdefault('extensions', [])
     result.setdefault('samples', {})
+    
+    # Log summary of parsed data
+    logger.info(f"Parsing complete. Found {result['total_errors']} errors, {len(result['categories'])} categories, {len(result['extensions'])} extensions")
     
     return result
 

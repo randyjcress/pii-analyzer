@@ -608,6 +608,8 @@ function loadErrorAnalysis() {
 
 // Update error analysis section
 function updateErrorAnalysis(data) {
+    console.log('Starting updateErrorAnalysis with data:', data);
+    
     // Check if we have valid data
     if (!data || data.total_errors === undefined) {
         console.error("Invalid error analysis data received:", data);
@@ -618,30 +620,68 @@ function updateErrorAnalysis(data) {
     // Update total error count
     elements.totalErrorFiles.textContent = data.total_errors.toLocaleString();
     
+    // Create a fallback display in case charts don't render
+    let fallbackHTML = '';
+    
     // Check if we have categories and extensions before trying to render charts
     if (data.categories && data.categories.length > 0) {
+        console.log(`Found ${data.categories.length} categories to display:`, data.categories);
         updateErrorCategoriesChart(data.categories);
+        
+        // Create fallback content
+        fallbackHTML += '<div class="mt-3"><h5>Error Categories</h5><ul>';
+        data.categories.forEach(cat => {
+            fallbackHTML += `<li>${cat.name}: ${cat.count} (${cat.percentage}%)</li>`;
+        });
+        fallbackHTML += '</ul></div>';
     } else {
         console.warn("No error categories data available for chart");
         document.getElementById('errorCategoriesChart').parentNode.innerHTML = 
-            '<div class="alert alert-info">No error category data available.</div>';
+            '<div class="alert alert-info">No error category data available.</div>' + fallbackHTML;
     }
     
     if (data.extensions && data.extensions.length > 0) {
+        console.log(`Found ${data.extensions.length} extensions to display:`, data.extensions);
         updateErrorExtensionsChart(data.extensions);
+        
+        // Create fallback content
+        fallbackHTML += '<div class="mt-3"><h5>File Extensions with Errors</h5><ul>';
+        data.extensions.forEach(ext => {
+            fallbackHTML += `<li>${ext.extension}: ${ext.count} (${ext.percentage}%)</li>`;
+        });
+        fallbackHTML += '</ul></div>';
     } else {
         console.warn("No error extensions data available for chart");
         document.getElementById('errorExtensionsChart').parentNode.innerHTML = 
-            '<div class="alert alert-info">No file extension error data available.</div>';
+            '<div class="alert alert-info">No file extension error data available.</div>' + fallbackHTML;
     }
     
     // Update error samples accordion
     if (data.samples && Object.keys(data.samples).length > 0) {
+        console.log(`Found ${Object.keys(data.samples).length} sample categories to display`);
         updateErrorSamplesAccordion(data.samples);
     } else {
         elements.errorSamplesAccordion.innerHTML = 
             '<div class="alert alert-info">No error samples available.</div>';
     }
+    
+    // Add a debug section in case there are issues
+    const debugInfo = document.createElement('div');
+    debugInfo.className = 'd-none'; // Hidden by default
+    debugInfo.innerHTML = `
+        <button class="btn btn-sm btn-secondary mb-2" onclick="this.nextElementSibling.classList.toggle('d-none')">
+            Toggle Debug Info
+        </button>
+        <div class="d-none">
+            <pre class="bg-light p-2 small">${JSON.stringify({
+                total_errors: data.total_errors,
+                categories_count: data.categories ? data.categories.length : 0,
+                extensions_count: data.extensions ? data.extensions.length : 0,
+                samples_count: data.samples ? Object.keys(data.samples).length : 0
+            }, null, 2)}</pre>
+        </div>
+    `;
+    elements.errorAnalysisContent.appendChild(debugInfo);
 }
 
 // Update error categories chart
