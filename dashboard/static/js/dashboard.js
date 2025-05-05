@@ -5,7 +5,7 @@ let charts = {};
 let currentJobId = null;
 let refreshInterval = 30000; // Default refresh interval: 30 seconds
 let refreshTimer = null;
-let dbPath = 'pii_results.db'; // Default database path
+let dbPath = null; // Will be determined by the server or URL parameter
 
 // DOM Elements
 const elements = {
@@ -64,17 +64,35 @@ document.addEventListener('DOMContentLoaded', function() {
     elements.refreshButton.addEventListener('click', refreshDashboard);
     elements.jobSelector.addEventListener('change', changeJob);
     
-    // Get database path from URL if provided
+    // First, check for URL parameter
     const urlParams = new URLSearchParams(window.location.search);
     if (urlParams.has('db_path')) {
         dbPath = urlParams.get('db_path');
     }
     
-    // Load jobs
-    loadJobs();
-    
-    // Initial dashboard data load
-    loadDashboardData();
+    // If no URL parameter, fetch server config to get the database path
+    if (!dbPath) {
+        fetch('/api/config')
+            .then(response => response.json())
+            .then(data => {
+                if (data.db_path) {
+                    dbPath = data.db_path;
+                } else {
+                    dbPath = 'pii_results.db'; // Default as last resort
+                }
+                loadJobs();
+                loadDashboardData();
+            })
+            .catch(error => {
+                console.error('Failed to get server config:', error);
+                dbPath = 'pii_results.db'; // Fall back to default
+                loadJobs();
+                loadDashboardData();
+            });
+    } else {
+        loadJobs();
+        loadDashboardData();
+    }
     
     // Set up auto-refresh
     startRefreshTimer();
@@ -82,7 +100,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // Load available jobs
 function loadJobs() {
-    fetch(`/api/jobs?db_path=${encodeURIComponent(dbPath)}`)
+    let url = '/api/jobs';
+    if (dbPath) {
+        url += `?db_path=${encodeURIComponent(dbPath)}`;
+    }
+    
+    fetch(url)
         .then(response => {
             if (!response.ok) {
                 throw new Error('Failed to load jobs');
@@ -142,12 +165,23 @@ function loadDashboardData(forceRefresh = false) {
     elements.errorAlert.classList.add('d-none');
     
     // Build URL with parameters
-    let url = `/api/dashboard?db_path=${encodeURIComponent(dbPath)}`;
-    if (currentJobId) {
-        url += `&job_id=${currentJobId}`;
+    let url = '/api/dashboard';
+    const params = [];
+    
+    if (dbPath) {
+        params.push(`db_path=${encodeURIComponent(dbPath)}`);
     }
+    
+    if (currentJobId) {
+        params.push(`job_id=${currentJobId}`);
+    }
+    
     if (forceRefresh) {
-        url += '&refresh=1';
+        params.push('refresh=1');
+    }
+    
+    if (params.length > 0) {
+        url += '?' + params.join('&');
     }
     
     // Fetch dashboard data
@@ -450,7 +484,12 @@ function loadErrorAnalysis() {
     elements.errorAnalysisContent.classList.add('d-none');
     
     // Fetch error analysis data
-    fetch(`/api/error_analysis?db_path=${encodeURIComponent(dbPath)}`)
+    let url = '/api/error_analysis';
+    if (dbPath) {
+        url += `?db_path=${encodeURIComponent(dbPath)}`;
+    }
+    
+    fetch(url)
         .then(response => {
             if (!response.ok) {
                 throw new Error('Failed to load error analysis');

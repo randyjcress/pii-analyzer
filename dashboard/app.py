@@ -382,6 +382,17 @@ def parse_error_analysis_output(output: str) -> Dict[str, Any]:
     
     return result
 
+@app.route('/api/config')
+def api_config():
+    """API endpoint to get server configuration"""
+    db_path = os.environ.get('PII_DB_PATH', 'pii_results.db')
+    
+    return jsonify({
+        'status': 'success',
+        'db_path': db_path,
+        'server_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    })
+
 @app.route('/static/<path:path>')
 def send_static(path):
     """Serve static files"""
