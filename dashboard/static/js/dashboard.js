@@ -154,6 +154,13 @@ function checkDarkMode() {
         isDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
         console.log(`System color scheme: ${isDarkMode ? 'dark' : 'light'}`);
         
+        // Set dark-mode class on html element to match CSS
+        if (isDarkMode) {
+            document.documentElement.classList.add('dark-mode');
+        } else {
+            document.documentElement.classList.remove('dark-mode');
+        }
+        
         // Update Chart.js defaults for the current color scheme
         updateChartDefaults();
         
