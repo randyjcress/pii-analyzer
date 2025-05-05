@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PII Analysis Dashboard</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">PII Analysis Dashboard</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link active" href="#overview">Overview</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#file-types">File Types</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#entity-types">Entity Types</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#high-risk">High Risk Files</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#errors">Error Analysis</a>
+                    </li>
+                </ul>
+                <div class="d-flex">
+                    <select id="jobSelector" class="form-select me-2">
+                        <option value="">Loading jobs...</option>
+                    </select>
+                    <button id="refreshButton" class="btn btn-light">
+                        <i class="bi bi-arrow-clockwise"></i> Refresh
+                    </button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid mt-3">
+        <div class="alert alert-danger d-none" id="errorAlert">
+            <strong>Error:</strong> <span id="errorMessage"></span>
+        </div>
+
+        <div id="loadingIndicator" class="text-center my-5">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p class="mt-2">Loading dashboard data...</p>
+        </div>
+
+        <div id="dashboardContent" class="d-none">
+            <!-- Overview Section -->
+            <section id="overview" class="mb-4">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <h4 class="mb-0">Overview</h4>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="card mb-3">
+                                    <div class="card-header">Job Information</div>
+                                    <div class="card-body">
+                                        <p><strong>Job Name:</strong> <span id="jobName"></span></p>
+                                        <p><strong>Job Status:</strong> <span id="jobStatus"></span></p>
+                                        <p><strong>Start Time:</strong> <span id="jobStartTime"></span></p>
+                                        <p><strong>Last Updated:</strong> <span id="jobLastUpdated"></span></p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="card mb-3">
+                                    <div class="card-header">Time Information</div>
+                                    <div class="card-body">
+                                        <p><strong>Elapsed Time:</strong> <span id="elapsedTime"></span></p>
+                                        <p><strong>Files Per Hour:</strong> <span id="filesPerHour"></span></p>
+                                        <p><strong>Estimated Completion:</strong> <span id="estimatedCompletion"></span></p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="row mt-3">
+                            <div class="col-md-12">
+                                <div class="card">
+                                    <div class="card-header">Progress</div>
+                                    <div class="card-body">
+                                        <div class="progress mb-3" style="height: 25px;">
+                                            <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated" 
+                                                 role="progressbar" style="width: 0%"></div>
+                                        </div>
+                                        <div class="row text-center">
+                                            <div class="col">
+                                                <div class="stat-box">
+                                                    <h5 id="totalFiles">0</h5>
+                                                    <p>Total Files</p>
+                                                </div>
+                                            </div>
+                                            <div class="col">
+                                                <div class="stat-box">
+                                                    <h5 id="completedFiles">0</h5>
+                                                    <p>Completed</p>
+                                                </div>
+                                            </div>
+                                            <div class="col">
+                                                <div class="stat-box">
+                                                    <h5 id="pendingFiles">0</h5>
+                                                    <p>Pending</p>
+                                                </div>
+                                            </div>
+                                            <div class="col">
+                                                <div class="stat-box">
+                                                    <h5 id="processingFiles">0</h5>
+                                                    <p>Processing</p>
+                                                </div>
+                                            </div>
+                                            <div class="col">
+                                                <div class="stat-box text-danger">
+                                                    <h5 id="errorFiles">0</h5>
+                                                    <p>Errors</p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- File Types Section -->
+            <section id="file-types" class="mb-4">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <h4 class="mb-0">File Types</h4>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <canvas id="fileTypesChart"></canvas>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="table-responsive">
+                                    <table class="table table-striped table-hover">
+                                        <thead>
+                                            <tr>
+                                                <th>File Type</th>
+                                                <th>Count</th>
+                                                <th>Percentage</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="fileTypesTable">
+                                            <!-- File types will be inserted here -->
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Entity Types Section -->
+            <section id="entity-types" class="mb-4">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <h4 class="mb-0">Entity Types</h4>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <canvas id="entityTypesChart"></canvas>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="table-responsive">
+                                    <table class="table table-striped table-hover">
+                                        <thead>
+                                            <tr>
+                                                <th>Entity Type</th>
+                                                <th>Count</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="entityTypesTable">
+                                            <!-- Entity types will be inserted here -->
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- High Risk Files Section -->
+            <section id="high-risk" class="mb-4">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <h4 class="mb-0">High Risk Files</h4>
+                    </div>
+                    <div class="card-body">
+                        <div class="alert alert-info mb-3">
+                            <strong>High Risk Files:</strong> <span id="highRiskCount">0</span> files detected with high-risk PII
+                        </div>
+                        
+                        <div class="card mb-3">
+                            <div class="card-header">Executive Summary</div>
+                            <div class="card-body">
+                                <pre id="executiveSummary" class="pre-scrollable"></pre>
+                            </div>
+                        </div>
+                        
+                        <div class="table-responsive">
+                            <table class="table table-striped table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>#</th>
+                                        <th>File Path</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="highRiskTable">
+                                    <!-- High risk files will be inserted here -->
+                                </tbody>
+                            </table>
+                            <div id="highRiskMoreMessage" class="text-center d-none">
+                                <p>Showing first 50 results. There are more high-risk files not shown.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Error Analysis Section -->
+            <section id="errors" class="mb-4">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <h4 class="mb-0">Error Analysis</h4>
+                    </div>
+                    <div class="card-body">
+                        <div id="errorAnalysisLoading" class="text-center my-3">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Loading error analysis...</span>
+                            </div>
+                            <p>Loading error analysis data...</p>
+                        </div>
+                        
+                        <div id="errorAnalysisContent" class="d-none">
+                            <div class="alert alert-info mb-3">
+                                <strong>Total Error Files:</strong> <span id="totalErrorFiles">0</span>
+                            </div>
+                            
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="card mb-3">
+                                        <div class="card-header">Error Categories</div>
+                                        <div class="card-body">
+                                            <canvas id="errorCategoriesChart"></canvas>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="card mb-3">
+                                        <div class="card-header">File Extensions with Errors</div>
+                                        <div class="card-body">
+                                            <canvas id="errorExtensionsChart"></canvas>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="accordion" id="errorSamplesAccordion">
+                                <!-- Error samples will be inserted here -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <footer class="text-center py-3 mt-4 text-muted">
+            <p>PII Analysis Dashboard - Last Updated: <span id="lastUpdated"></span></p>
+        </footer>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js"></script>
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html> 
