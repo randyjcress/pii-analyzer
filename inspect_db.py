@@ -285,11 +285,17 @@ def reset_error_files(conn):
         print("No error files to reset")
         return
     
-    # Options to exclude temp files and retry specific extensions
+    # Options to exclude certain files
     exclude_temp_files = True  # Skip resetting temporary Office files (starting with ~$)
+    exclude_small_files = True  # Skip resetting small/empty files
+    min_file_size = 100  # Minimum file size in bytes to consider for reset (files smaller than this will be skipped)
     
     # Optional: Allow filtering by job ID
     # job_id = None  # Set to a specific job ID to only reset errors for that job
+    
+    # Build the query conditions
+    conditions = ["status = 'error'"]
+    excluded_counts = {}
     
     # Exclude temporary files if requested
     if exclude_temp_files:
@@ -299,33 +305,40 @@ def reset_error_files(conn):
         WHERE status = 'error' AND file_path LIKE '%/~$%'
         """)
         temp_count = cursor.fetchone()['count']
-        print(f"Excluding {temp_count} temporary Office files")
-        
-        # Reset all error files except temp files
+        excluded_counts["temp_files"] = temp_count
+        conditions.append("file_path NOT LIKE '%/~$%'")
+    
+    # Exclude small files if requested
+    if exclude_small_files:
+        # Check how many small files exist
         cursor.execute("""
-        UPDATE files
-        SET 
-            status = 'pending',
-            process_start = NULL,
-            process_end = NULL,
-            error_message = NULL
-        WHERE status = 'error' AND file_path NOT LIKE '%/~$%'
-        """)
-        
-        reset_count = cursor.rowcount
-    else:
-        # Reset all error files
-        cursor.execute("""
-        UPDATE files
-        SET 
-            status = 'pending',
-            process_start = NULL,
-            process_end = NULL,
-            error_message = NULL
-        WHERE status = 'error'
-        """)
-        
-        reset_count = cursor.rowcount
+        SELECT COUNT(*) as count FROM files 
+        WHERE status = 'error' AND (file_size IS NULL OR file_size <= ?)
+        """, (min_file_size,))
+        small_count = cursor.fetchone()['count']
+        excluded_counts["small_files"] = small_count
+        conditions.append(f"(file_size > {min_file_size})")
+    
+    # Combine all conditions
+    where_clause = " AND ".join(conditions)
+    
+    # Print exclusion info
+    for category, count in excluded_counts.items():
+        print(f"Excluding {count} {category.replace('_', ' ')}")
+    
+    # Reset filtered error files
+    reset_query = f"""
+    UPDATE files
+    SET 
+        status = 'pending',
+        process_start = NULL,
+        process_end = NULL,
+        error_message = NULL
+    WHERE {where_clause}
+    """
+    
+    cursor.execute(reset_query)
+    reset_count = cursor.rowcount
     
     # Commit changes
     conn.commit()
@@ -341,8 +354,10 @@ def reset_error_files(conn):
     
     conn.commit()
     
+    total_excluded = sum(excluded_counts.values())
     print(f"Successfully reset {reset_count} files from 'error' to 'pending' status")
-    print(f"These files will be reprocessed on the next run of process_files.py")
+    print(f"Excluded {total_excluded} files ({', '.join([f'{count} {cat.replace('_', ' ')}' for cat, count in excluded_counts.items()])})")
+    print(f"Files will be reprocessed on the next run of process_files.py")
 
 def analyze_error_files(conn):
     """
@@ -502,7 +517,15 @@ def main():
                       help='Analyze error files to identify patterns and categorize errors')
     parser.add_argument('--reset-errors', action='store_true',
                       help='Reset error files back to pending status so they can be reprocessed')
+    parser.add_argument('--min-size', type=int, default=100,
+                      help='Minimum file size in bytes to reset when using --reset-errors (default: 100)')
     args = parser.parse_args()
+    
+    # If min-size is provided, modify the global variable
+    if args.reset_errors and hasattr(args, 'min_size'):
+        # This is a bit of a hack, but it works for simple script
+        global min_file_size
+        min_file_size = args.min_size
     
     inspect_database(args.db_path, args.show_speed, args.time_window, args.review_errors, args.reset_errors)
 
