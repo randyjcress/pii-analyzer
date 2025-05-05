@@ -273,9 +273,6 @@ def api_error_analysis():
         # Create a custom connection with row factory
         conn = db.conn
         
-        # Use the analyze_error_files function from inspect_db
-        result = {}
-        
         # Capture stdout to get the text output
         import io
         from contextlib import redirect_stdout
@@ -287,13 +284,49 @@ def api_error_analysis():
         # Parse the output to extract key information
         error_data = parse_error_analysis_output(output)
         
+        # Debug logging
+        logger.info(f"Error analysis completed for {db_path}")
+        logger.debug(f"Error data structure: {error_data}")
+        
         return jsonify({
             'status': 'success',
             'error_analysis': error_data,
             'raw_output': output
         })
     except Exception as e:
-        logger.error(f"Error analyzing errors: {e}")
+        logger.error(f"Error analyzing errors: {str(e)}", exc_info=True)
+        return jsonify({
+            'error': str(e),
+            'status': 'error'
+        }), 500
+
+@app.route('/api/error_analysis/debug')
+def api_error_analysis_debug():
+    """Debug endpoint to get raw error analysis output"""
+    db_path = request.args.get('db_path', os.environ.get('PII_DB_PATH', 'pii_results.db'))
+    
+    try:
+        # Connect to database
+        db = get_database(db_path)
+        
+        # Create a custom connection with row factory
+        conn = db.conn
+        
+        # Capture stdout to get the text output
+        import io
+        from contextlib import redirect_stdout
+        
+        with io.StringIO() as buf, redirect_stdout(buf):
+            inspect_db.analyze_error_files(conn)
+            output = buf.getvalue()
+        
+        return jsonify({
+            'status': 'success',
+            'raw_output': output,
+            'db_path': db_path
+        })
+    except Exception as e:
+        logger.error(f"Error in debug endpoint: {str(e)}", exc_info=True)
         return jsonify({
             'error': str(e),
             'status': 'error'
@@ -321,7 +354,11 @@ def parse_error_analysis_output(output: str) -> Dict[str, Any]:
         if "Total error files:" in line:
             parts = line.split(": ")
             if len(parts) == 2:
-                result['total_errors'] = int(parts[1])
+                try:
+                    result['total_errors'] = int(parts[1])
+                except ValueError:
+                    logger.warning(f"Could not parse total errors from: {line}")
+                    result['total_errors'] = 0
         
         elif "Error Categories:" in line:
             current_section = "categories"
@@ -338,13 +375,16 @@ def parse_error_analysis_output(output: str) -> Dict[str, Any]:
             if len(parts) == 2:
                 category_parts = parts[1].split(" (")
                 if len(category_parts) == 2:
-                    count = int(category_parts[0])
-                    percentage = float(category_parts[1].rstrip("%)"))
-                    result['categories'].append({
-                        'name': parts[0].strip(),
-                        'count': count,
-                        'percentage': percentage
-                    })
+                    try:
+                        count = int(category_parts[0])
+                        percentage = float(category_parts[1].rstrip("%)"))
+                        result['categories'].append({
+                            'name': parts[0].strip(),
+                            'count': count,
+                            'percentage': percentage
+                        })
+                    except (ValueError, IndexError) as e:
+                        logger.warning(f"Error parsing category line '{line}': {e}")
         
         elif current_section == "extensions" and line.startswith("  "):
             # Parse extension lines
@@ -352,13 +392,17 @@ def parse_error_analysis_output(output: str) -> Dict[str, Any]:
             if len(parts) == 2:
                 ext_parts = parts[1].split(" (")
                 if len(ext_parts) == 2:
-                    count = int(ext_parts[0].split(" ")[0])
-                    percentage = float(ext_parts[1].rstrip("%)"))
-                    result['extensions'].append({
-                        'extension': parts[0].strip(),
-                        'count': count,
-                        'percentage': percentage
-                    })
+                    try:
+                        count_part = ext_parts[0].split(" ")[0]
+                        count = int(count_part)
+                        percentage = float(ext_parts[1].rstrip("%)"))
+                        result['extensions'].append({
+                            'extension': parts[0].strip(),
+                            'count': count,
+                            'percentage': percentage
+                        })
+                    except (ValueError, IndexError) as e:
+                        logger.warning(f"Error parsing extension line '{line}': {e}")
         
         elif current_section == "samples" and line.startswith("  ") and not line.startswith("    "):
             # New category in samples
@@ -368,17 +412,26 @@ def parse_error_analysis_output(output: str) -> Dict[str, Any]:
         
         elif current_section == "samples" and current_category and line.startswith("    Sample"):
             # Sample file path
-            file_path = line.replace("Sample", "").split(": ", 1)[1].strip()
-            result['samples'][current_category].append({
-                'file_path': file_path,
-                'error': None
-            })
+            file_parts = line.replace("Sample", "").split(": ", 1)
+            if len(file_parts) > 1:
+                file_path = file_parts[1].strip()
+                result['samples'][current_category].append({
+                    'file_path': file_path,
+                    'error': None
+                })
         
         elif current_section == "samples" and current_category and line.startswith("      Error:"):
             # Error message for the last sample
-            error_msg = line.split(": ", 1)[1].strip()
-            if result['samples'][current_category]:
-                result['samples'][current_category][-1]['error'] = error_msg
+            error_parts = line.split(": ", 1)
+            if len(error_parts) > 1:
+                error_msg = error_parts[1].strip()
+                if result['samples'][current_category]:
+                    result['samples'][current_category][-1]['error'] = error_msg
+    
+    # Ensure we have at least empty arrays/objects for all keys
+    result.setdefault('categories', [])
+    result.setdefault('extensions', [])
+    result.setdefault('samples', {})
     
     return result
 

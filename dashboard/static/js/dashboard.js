@@ -527,13 +527,16 @@ function loadErrorAnalysis() {
             return response.json();
         })
         .then(data => {
-            if (data.status === 'success') {
+            // Log the response for debugging
+            console.log("Error analysis API response:", data);
+            
+            if (data.status === 'success' && data.error_analysis) {
                 updateErrorAnalysis(data.error_analysis);
                 elements.errorAnalysisLoading.classList.add('d-none');
                 elements.errorAnalysisContent.classList.remove('d-none');
             } else {
-                console.error('Error analysis failed:', data.error);
-                elements.errorAnalysisLoading.innerHTML = `<div class="alert alert-danger">Failed to load error analysis: ${data.error}</div>`;
+                console.error('Error analysis failed:', data.error || 'Unknown error');
+                elements.errorAnalysisLoading.innerHTML = `<div class="alert alert-danger">Failed to load error analysis: ${data.error || 'Unknown error'}</div>`;
             }
         })
         .catch(error => {
@@ -544,22 +547,54 @@ function loadErrorAnalysis() {
 
 // Update error analysis section
 function updateErrorAnalysis(data) {
+    // Check if we have valid data
+    if (!data || data.total_errors === undefined) {
+        console.error("Invalid error analysis data received:", data);
+        elements.errorAnalysisLoading.innerHTML = `<div class="alert alert-warning">Error analysis data is incomplete or invalid.</div>`;
+        return;
+    }
+
     // Update total error count
     elements.totalErrorFiles.textContent = data.total_errors.toLocaleString();
     
-    // Update error categories chart
-    updateErrorCategoriesChart(data.categories);
+    // Check if we have categories and extensions before trying to render charts
+    if (data.categories && data.categories.length > 0) {
+        updateErrorCategoriesChart(data.categories);
+    } else {
+        console.warn("No error categories data available for chart");
+        document.getElementById('errorCategoriesChart').parentNode.innerHTML = 
+            '<div class="alert alert-info">No error category data available.</div>';
+    }
     
-    // Update error extensions chart
-    updateErrorExtensionsChart(data.extensions);
+    if (data.extensions && data.extensions.length > 0) {
+        updateErrorExtensionsChart(data.extensions);
+    } else {
+        console.warn("No error extensions data available for chart");
+        document.getElementById('errorExtensionsChart').parentNode.innerHTML = 
+            '<div class="alert alert-info">No file extension error data available.</div>';
+    }
     
     // Update error samples accordion
-    updateErrorSamplesAccordion(data.samples);
+    if (data.samples && Object.keys(data.samples).length > 0) {
+        updateErrorSamplesAccordion(data.samples);
+    } else {
+        elements.errorSamplesAccordion.innerHTML = 
+            '<div class="alert alert-info">No error samples available.</div>';
+    }
 }
 
 // Update error categories chart
 function updateErrorCategoriesChart(categories) {
     const ctx = document.getElementById('errorCategoriesChart').getContext('2d');
+    
+    // Verify we have valid categories
+    if (!categories || !Array.isArray(categories) || categories.length === 0) {
+        console.error("Invalid categories data for chart:", categories);
+        return;
+    }
+    
+    // Debug output
+    console.log("Rendering error categories chart with data:", categories);
     
     // Prepare data
     const labels = [];
@@ -570,9 +605,17 @@ function updateErrorCategoriesChart(categories) {
     ];
     
     categories.forEach((category, index) => {
-        labels.push(category.name);
-        data.push(category.count);
+        if (category && category.name && category.count !== undefined) {
+            labels.push(category.name);
+            data.push(category.count);
+        }
     });
+    
+    // If we have no valid data after filtering, exit
+    if (labels.length === 0 || data.length === 0) {
+        console.error("No valid category data after processing");
+        return;
+    }
     
     // Destroy existing chart if it exists
     if (charts.errorCategories) {
@@ -615,8 +658,8 @@ function updateErrorCategoriesChart(categories) {
                         label: function(context) {
                             const label = context.label || '';
                             const value = context.parsed || 0;
-                            const percentage = Math.round(context.dataset.data[context.dataIndex] / 
-                                context.dataset.data.reduce((a, b) => a + b, 0) * 100);
+                            const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                            const percentage = total > 0 ? Math.round((value / total) * 100) : 0;
                             return `${label}: ${value.toLocaleString()} (${percentage}%)`;
                         }
                     }
@@ -632,6 +675,15 @@ function updateErrorCategoriesChart(categories) {
 function updateErrorExtensionsChart(extensions) {
     const ctx = document.getElementById('errorExtensionsChart').getContext('2d');
     
+    // Verify we have valid extensions
+    if (!extensions || !Array.isArray(extensions) || extensions.length === 0) {
+        console.error("Invalid extensions data for chart:", extensions);
+        return;
+    }
+    
+    // Debug output
+    console.log("Rendering error extensions chart with data:", extensions);
+    
     // Prepare data
     const labels = [];
     const data = [];
@@ -643,13 +695,20 @@ function updateErrorExtensionsChart(extensions) {
     // Sort by count
     extensions.sort((a, b) => b.count - a.count);
     
-    // Take top 10 extensions
-    const topExtensions = extensions.slice(0, 10);
+    // Take top 10 extensions with valid data
+    let validExtensions = extensions.filter(ext => ext && ext.extension && ext.count !== undefined);
+    const topExtensions = validExtensions.slice(0, 10);
     
     topExtensions.forEach((ext, index) => {
         labels.push(ext.extension || 'Unknown');
         data.push(ext.count);
     });
+    
+    // If we have no valid data after filtering, exit
+    if (labels.length === 0 || data.length === 0) {
+        console.error("No valid extension data after processing");
+        return;
+    }
     
     // Destroy existing chart if it exists
     if (charts.errorExtensions) {
