@@ -10,11 +10,12 @@ import json
 import time
 import logging
 import argparse
+import secrets
 from datetime import datetime
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
-from flask import Flask, render_template, jsonify, request, abort, send_from_directory
+from flask import Flask, render_template, jsonify, request, abort, send_from_directory, redirect, url_for, session
 
 # Add project root to path
 import sys
@@ -44,6 +45,17 @@ app = Flask(__name__,
             static_folder=os.path.join(os.path.dirname(__file__), 'static'),
             template_folder=os.path.join(os.path.dirname(__file__), 'templates'))
 
+# Configuration
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    PERMANENT_SESSION_LIFETIME=86400,  # 24 hours
+)
+
+# Global variables
+password_required = False
+dashboard_password = None
+
 # Global cache for dashboard data
 cache = {
     'last_update': 0,
@@ -53,6 +65,65 @@ cache = {
     'db_path': None,
     'refresh_interval': 30  # seconds
 }
+
+# Check if user is authenticated
+def is_authenticated():
+    """Check if the user is authenticated"""
+    # If no password is required, always return True
+    if not password_required:
+        return True
+    
+    # Otherwise, check if the user is logged in
+    return session.get('authenticated', False)
+
+# Authentication routes
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Handle login requests"""
+    # If no password is required, redirect to dashboard
+    if not password_required:
+        return redirect(url_for('index'))
+    
+    error = None
+    
+    # Handle login form submission
+    if request.method == 'POST':
+        if request.form.get('password') == dashboard_password:
+            session['authenticated'] = True
+            session.permanent = True
+            return redirect(url_for('index'))
+        else:
+            error = 'Invalid password'
+    
+    # Render login page
+    return render_template('login.html', error=error)
+
+@app.route('/logout')
+def logout():
+    """Handle logout requests"""
+    session.pop('authenticated', None)
+    return redirect(url_for('login'))
+
+# Middleware to check authentication
+@app.before_request
+def check_auth():
+    """Check authentication before processing requests"""
+    # Skip authentication for static files and login page
+    if request.path.startswith('/static/') or request.path == '/login':
+        return None
+    
+    # If authentication is required and user is not authenticated, redirect to login
+    if password_required and not is_authenticated():
+        # Allow API calls with password in header
+        if request.path.startswith('/api/'):
+            auth_header = request.headers.get('Authorization')
+            if auth_header and auth_header == f"Bearer {dashboard_password}":
+                return None
+            return jsonify({'error': 'Authentication required', 'status': 'error'}), 401
+        
+        return redirect(url_for('login'))
+    
+    return None
 
 def load_dashboard_data(db_path: str, job_id: Optional[int] = None, force_refresh: bool = False) -> Dict[str, Any]:
     """
@@ -217,7 +288,7 @@ def load_dashboard_data(db_path: str, job_id: Optional[int] = None, force_refres
 @app.route('/')
 def index():
     """Render the main dashboard page"""
-    return render_template('index.html')
+    return render_template('index.html', password_required=password_required)
 
 @app.route('/api/dashboard')
 def api_dashboard():
@@ -443,6 +514,7 @@ def api_config():
     return jsonify({
         'status': 'success',
         'db_path': db_path,
+        'auth_required': password_required,
         'server_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     })
 
@@ -457,11 +529,23 @@ def parse_args():
     parser.add_argument('--db-path', type=str, help='Path to the PII database file')
     parser.add_argument('--port', type=int, default=5000, help='Port to run the dashboard on')
     parser.add_argument('--debug', action='store_true', help='Run in debug mode')
+    parser.add_argument('--password', type=str, help='Set a password for dashboard access')
     return parser.parse_args()
 
 def main():
     """Run the Flask application"""
+    global dashboard_password, password_required
+    
     args = parse_args()
+    
+    # Set password if provided
+    if args.password:
+        dashboard_password = args.password
+        password_required = True
+        logger.info("Password protection enabled")
+    
+    # Generate a secret key for sessions
+    app.secret_key = secrets.token_hex(16)
     
     # Set default database path from arguments, environment, or use default
     if args.db_path:

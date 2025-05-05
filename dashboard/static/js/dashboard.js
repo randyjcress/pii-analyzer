@@ -7,6 +7,8 @@ let refreshInterval = 600000; // 10 minutes refresh interval
 let refreshTimer = null;
 let dbPath = null; // Will be determined by the server or URL parameter
 let autoRefreshEnabled = true; // Auto-refresh enabled by default
+let authRequired = false; // Whether authentication is required
+let authToken = null; // Authentication token (password) for API requests
 
 // DOM Elements
 const elements = {
@@ -85,16 +87,24 @@ document.addEventListener('DOMContentLoaded', function() {
         dbPath = urlParams.get('db_path');
     }
     
+    // Check for authentication token in URL
+    if (urlParams.has('token')) {
+        authToken = urlParams.get('token');
+    }
+    
     // If no URL parameter, fetch server config to get the database path
     if (!dbPath) {
-        fetch('/api/config')
-            .then(response => response.json())
+        fetchConfig()
             .then(data => {
                 if (data.db_path) {
                     dbPath = data.db_path;
                 } else {
                     dbPath = 'pii_results.db'; // Default as last resort
                 }
+                
+                // Check if authentication is required
+                authRequired = data.auth_required === true;
+                
                 loadJobs();
                 loadDashboardData();
             })
@@ -105,8 +115,18 @@ document.addEventListener('DOMContentLoaded', function() {
                 loadDashboardData();
             });
     } else {
-        loadJobs();
-        loadDashboardData();
+        fetchConfig()
+            .then(data => {
+                // Check if authentication is required
+                authRequired = data.auth_required === true;
+                
+                loadJobs();
+                loadDashboardData();
+            })
+            .catch(() => {
+                loadJobs();
+                loadDashboardData();
+            });
     }
     
     // Set up auto-refresh
@@ -114,6 +134,34 @@ document.addEventListener('DOMContentLoaded', function() {
         startRefreshTimer();
     }
 });
+
+// Fetch server configuration
+function fetchConfig() {
+    return fetch('/api/config', getRequestOptions())
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Failed to load config');
+            }
+            return response.json();
+        });
+}
+
+// Get request options with authentication if needed
+function getRequestOptions() {
+    const options = {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json'
+        }
+    };
+    
+    // Add authentication header if token is available
+    if (authRequired && authToken) {
+        options.headers['Authorization'] = `Bearer ${authToken}`;
+    }
+    
+    return options;
+}
 
 // Toggle auto-refresh
 function toggleAutoRefresh() {
@@ -135,7 +183,7 @@ function loadJobs() {
         url += `?db_path=${encodeURIComponent(dbPath)}`;
     }
     
-    fetch(url)
+    fetch(url, getRequestOptions())
         .then(response => {
             if (!response.ok) {
                 throw new Error('Failed to load jobs');
@@ -215,9 +263,12 @@ function loadDashboardData(forceRefresh = false) {
     }
     
     // Fetch dashboard data
-    fetch(url)
+    fetch(url, getRequestOptions())
         .then(response => {
             if (!response.ok) {
+                if (response.status === 401) {
+                    throw new Error('Authentication required. Please login again.');
+                }
                 throw new Error('Failed to load dashboard data');
             }
             return response.json();
@@ -519,9 +570,12 @@ function loadErrorAnalysis() {
         url += `?db_path=${encodeURIComponent(dbPath)}`;
     }
     
-    fetch(url)
+    fetch(url, getRequestOptions())
         .then(response => {
             if (!response.ok) {
+                if (response.status === 401) {
+                    throw new Error('Authentication required. Please login again.');
+                }
                 throw new Error('Failed to load error analysis');
             }
             return response.json();
