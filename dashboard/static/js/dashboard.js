@@ -180,11 +180,45 @@ function updateChartDefaults() {
     try {
         if (window.Chart) {
             if (isDarkMode) {
+                // Dark mode chart settings
                 Chart.defaults.color = '#f8f9fa';
                 Chart.defaults.borderColor = '#495057';
+                
+                // Additional settings for better visibility
+                Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+                Chart.defaults.plugins.tooltip.titleColor = '#ffffff';
+                Chart.defaults.plugins.tooltip.bodyColor = '#ffffff';
+                Chart.defaults.plugins.legend.labels.color = '#f8f9fa';
+                
+                // Scale settings
+                Chart.defaults.scales.grid = {
+                    color: '#495057',
+                    borderColor: '#495057',
+                    tickColor: '#f8f9fa'
+                };
+                
+                // Apply to existing charts
+                console.log("Applied dark mode chart defaults");
             } else {
+                // Light mode chart settings
                 Chart.defaults.color = '#212529';
                 Chart.defaults.borderColor = '#e9ecef';
+                
+                // Additional settings for better visibility
+                Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+                Chart.defaults.plugins.tooltip.titleColor = '#ffffff';
+                Chart.defaults.plugins.tooltip.bodyColor = '#ffffff';
+                Chart.defaults.plugins.legend.labels.color = '#212529';
+                
+                // Scale settings
+                Chart.defaults.scales.grid = {
+                    color: '#e9ecef',
+                    borderColor: '#e9ecef',
+                    tickColor: '#212529'
+                };
+                
+                // Apply to existing charts
+                console.log("Applied light mode chart defaults");
             }
         }
     } catch (error) {
@@ -813,6 +847,10 @@ function updateErrorCategoriesChart(categories) {
         charts.errorCategories.destroy();
     }
     
+    // Determine text color based on mode
+    const textColor = isDarkMode ? '#f8f9fa' : '#212529';
+    const gridColor = isDarkMode ? '#495057' : '#e9ecef';
+    
     // Create chart
     try {
         charts.errorCategories = new Chart(ctx, {
@@ -833,9 +871,13 @@ function updateErrorCategoriesChart(categories) {
                     legend: {
                         position: 'right',
                         labels: {
+                            color: textColor,
                             font: {
                                 size: 12
-                            }
+                            },
+                            padding: 20,
+                            usePointStyle: true,
+                            boxWidth: 10
                         }
                     },
                     tooltip: {
@@ -922,6 +964,10 @@ function updateErrorExtensionsChart(extensions) {
         charts.errorExtensions.destroy();
     }
     
+    // Determine text color based on mode
+    const textColor = isDarkMode ? '#f8f9fa' : '#212529';
+    const gridColor = isDarkMode ? '#495057' : '#e9ecef';
+    
     // Create chart
     try {
         charts.errorExtensions = new Chart(ctx, {
@@ -943,7 +989,19 @@ function updateErrorExtensionsChart(extensions) {
                     x: {
                         beginAtZero: true,
                         ticks: {
-                            precision: 0
+                            precision: 0,
+                            color: textColor
+                        },
+                        grid: {
+                            color: gridColor
+                        }
+                    },
+                    y: {
+                        ticks: {
+                            color: textColor
+                        },
+                        grid: {
+                            color: gridColor
                         }
                     }
                 },

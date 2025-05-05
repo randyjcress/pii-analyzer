@@ -127,6 +127,11 @@ footer {
         color: #f8f9fa !important;
     }
     
+    /* Chart text fixes */
+    .chart-container {
+        color: #f8f9fa !important;
+    }
+    
     /* Cards */
     .card {
         background-color: #2c3034 !important;
