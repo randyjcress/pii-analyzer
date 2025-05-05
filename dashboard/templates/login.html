@@ -7,6 +7,16 @@
     <title>PII Analysis Dashboard - Login</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <!-- Immediate dark mode detection -->
+    <script>
+        // Apply dark mode class before page renders
+        (function() {
+            if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+                document.documentElement.classList.add('dark-mode');
+                console.log('Dark mode detected and applied immediately');
+            }
+        })();
+    </script>
     <style>
         body {
             background-color: #f8f9fa;
@@ -39,7 +49,7 @@
         }
         
         /* Dark mode styles */
-        @media (prefers-color-scheme: dark) {
+        @media (prefers-color-scheme: dark), html.dark-mode {
             body {
                 background-color: #212529;
                 color: #f8f9fa;
@@ -91,18 +101,18 @@
                 <div class="alert alert-danger">{{ error }}</div>
                 {% endif %}
                 
-                <form method="post" action="{{ url_for('login') }}">
+                <form method="post" action="{{ url_for('login') }}" id="loginForm">
                     <div class="mb-3">
                         <label for="password" class="form-label">Password</label>
                         <div class="input-group">
                             <input type="password" class="form-control" id="password" name="password" required>
-                            <button class="btn btn-outline-secondary" type="button" id="togglePassword">
+                            <button type="button" class="btn btn-outline-secondary" id="togglePassword">
                                 <i class="bi bi-eye"></i>
                             </button>
                         </div>
                     </div>
                     <div class="d-grid">
-                        <button type="submit" class="btn btn-primary">Login</button>
+                        <button type="submit" class="btn btn-primary" id="loginButton">Login</button>
                     </div>
                 </form>
             </div>
@@ -124,6 +134,15 @@
                 icon.classList.remove('bi-eye-slash');
                 icon.classList.add('bi-eye');
             }
+        });
+        
+        // Enhance login form submission 
+        document.getElementById('loginForm').addEventListener('submit', function(e) {
+            console.log('Login form submitted');
+            // Don't prevent default - let form submit normally
+            
+            // Ensure button doesn't have type="button" which would prevent form submission
+            document.getElementById('loginButton').setAttribute('type', 'submit');
         });
     </script>
 </body>

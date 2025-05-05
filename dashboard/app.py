@@ -82,17 +82,25 @@ def login():
     """Handle login requests"""
     # If no password is required, redirect to dashboard
     if not password_required:
+        logger.info("No password required, redirecting to dashboard")
         return redirect(url_for('index'))
     
     error = None
     
     # Handle login form submission
     if request.method == 'POST':
-        if request.form.get('password') == dashboard_password:
+        submitted_password = request.form.get('password')
+        logger.info(f"Login attempt with password: {'*' * len(submitted_password) if submitted_password else 'None'}")
+        
+        if submitted_password == dashboard_password:
+            logger.info("Login successful")
             session['authenticated'] = True
             session.permanent = True
+            # Ensure the session is saved
+            session.modified = True
             return redirect(url_for('index'))
         else:
+            logger.warning(f"Login failed: Invalid password (expected length: {len(dashboard_password) if dashboard_password else 0}, got length: {len(submitted_password) if submitted_password else 0})")
             error = 'Invalid password'
     
     # Render login page
@@ -876,6 +884,20 @@ def api_test_error_analysis():
             'error': str(e),
             'status': 'error'
         }), 500
+
+@app.route('/debug/session')
+def debug_session():
+    """Debug endpoint to check session status"""
+    if not app.debug:
+        abort(404)  # Only available in debug mode
+        
+    return jsonify({
+        'authenticated': session.get('authenticated', False),
+        'session_keys': list(session.keys()),
+        'password_required': password_required,
+        'has_dashboard_password': dashboard_password is not None,
+        'dashboard_password_length': len(dashboard_password) if dashboard_password else 0
+    })
 
 def parse_args():
     """Parse command line arguments"""
