@@ -345,16 +345,9 @@ def api_error_analysis():
         # Create a custom connection with row factory
         conn = db.conn
         
-        # Capture stdout to get the text output
-        import io
-        from contextlib import redirect_stdout
-        
-        with io.StringIO() as buf, redirect_stdout(buf):
-            inspect_db.analyze_error_files(conn)
-            output = buf.getvalue()
-        
-        # Parse the output to extract key information
-        error_data = parse_error_analysis_output(output)
+        # Use the new JSON output format directly
+        logger.info("Using direct JSON output from analyze_error_files")
+        error_data = inspect_db.analyze_error_files(conn, output_format='json')
         
         # Debug logging
         logger.info(f"Error analysis completed for {db_path}")
@@ -371,11 +364,6 @@ def api_error_analysis():
         # Validate the parsed data
         if error_data['total_errors'] > 0 and (not error_data['categories'] or not error_data['extensions']):
             logger.warning(f"Parsing issue: Found {error_data['total_errors']} errors but no categories or extensions")
-            # Add raw output for debugging in case of issues
-            error_data['_debug'] = {
-                'raw_output': output,
-                'parsing_warning': 'Found errors but no categories or extensions'
-            }
         
         return jsonify({
             'status': 'success',
@@ -407,20 +395,21 @@ def api_error_analysis_debug():
         # Create a custom connection with row factory
         conn = db.conn
         
+        # Get both text and JSON output for debugging
         # Capture stdout to get the text output
         import io
         from contextlib import redirect_stdout
         
         with io.StringIO() as buf, redirect_stdout(buf):
-            inspect_db.analyze_error_files(conn)
-            output = buf.getvalue()
+            inspect_db.analyze_error_files(conn, output_format='text')
+            text_output = buf.getvalue()
         
-        # Parse the output and include parsing details
-        error_data = parse_error_analysis_output(output)
+        # Get the JSON output directly
+        json_data = inspect_db.analyze_error_files(conn, output_format='json')
         
         # Add parsing markers for debugging
         parsed_lines = []
-        for i, line in enumerate(output.split('\n')):
+        for i, line in enumerate(text_output.split('\n')):
             if line.strip():
                 line_type = "unknown"
                 if "Total error files:" in line:
@@ -434,7 +423,7 @@ def api_error_analysis_debug():
                 elif line.strip().startswith("  ") and not line.strip().startswith("    "):
                     if ":" in line:
                         if any(c in line for c in ["(", ")"]):
-                            if "File Extensions with Errors:" in output.split('\n')[0:i]:
+                            if "File Extensions with Errors:" in text_output.split('\n')[0:i]:
                                 line_type = "extension_line"
                             else:
                                 line_type = "category_line"
@@ -445,9 +434,9 @@ def api_error_analysis_debug():
         
         return jsonify({
             'status': 'success',
-            'raw_output': output,
+            'raw_output': text_output,
             'db_path': db_path,
-            'parsed_data': error_data,
+            'parsed_data': json_data,
             'parsing_details': parsed_lines
         })
     except Exception as e:
@@ -468,19 +457,19 @@ def api_error_analysis_direct():
         db = get_database(db_path)
         conn = db.conn
         
-        # Capture stdout to get the text output
+        # Get JSON output directly
+        error_data = inspect_db.analyze_error_files(conn, output_format='json')
+        
+        # Get text output for debugging/comparison
         import io
         from contextlib import redirect_stdout
         
         with io.StringIO() as buf, redirect_stdout(buf):
-            inspect_db.analyze_error_files(conn)
-            output = buf.getvalue()
-        
-        # Parse the output
-        error_data = parse_error_analysis_output(output)
+            inspect_db.analyze_error_files(conn, output_format='text')
+            text_output = buf.getvalue()
         
         # Add raw output for debugging
-        error_data['_raw_output'] = output
+        error_data['_raw_output'] = text_output
         
         # Log detail of what we're parsing
         logger.info(f"Parsed error data with {len(error_data['categories'])} categories and {len(error_data['extensions'])} extensions")
@@ -514,87 +503,68 @@ def error_analysis_test_page():
         db = get_database(db_path)
         conn = db.conn
         
-        # Capture stdout
+        # Get error analysis data directly in JSON format
+        error_data = inspect_db.analyze_error_files(conn, output_format='json')
+        
+        # Also get text output for displaying
         import io
         from contextlib import redirect_stdout
         
         with io.StringIO() as buf, redirect_stdout(buf):
-            inspect_db.analyze_error_files(conn)
+            inspect_db.analyze_error_files(conn, output_format='text')
             output = buf.getvalue()
         
-        # Debug the raw output
-        logger.info(f"Raw output from analyze_error_files:\n{output}")
-        
-        # Parse the output
-        error_data = parse_error_analysis_output(output)
-        
         # Debug the parsed data
-        logger.info(f"Parsed error data: {error_data['total_errors']} total errors")
+        logger.info(f"Error analysis data: {error_data['total_errors']} total errors")
         logger.info(f"Categories parsed: {len(error_data['categories'])}")
         logger.info(f"Extensions parsed: {len(error_data['extensions'])}")
         
         # Add line-by-line parsing for debugging
         parsing_details = []
-        current_section = None
         
         for i, line in enumerate(output.split('\n')):
-            line_stripped = line.strip()
+            line_text = line.rstrip()  # Keep leading whitespace
+            line_stripped = line_text.strip()  # Complete stripped version
             line_type = "unknown"
             parsed_result = "Not processed"
             
+            # Check the type of line
             if not line_stripped:
                 line_type = "blank"
                 parsed_result = "Skipped (blank line)"
             elif "Total error files:" in line_stripped:
                 line_type = "total_count"
-                parsed_result = f"Found total: {error_data['total_errors']}"
+                try:
+                    count = int(line_stripped.split(":", 1)[1].strip())
+                    parsed_result = f"Found total: {count}"
+                except Exception as e:
+                    parsed_result = f"Error parsing: {str(e)}"
             elif "Error Categories:" in line_stripped:
                 line_type = "category_header"
-                current_section = "categories"
-                parsed_result = "Set current_section to 'categories'"
+                parsed_result = "Category header"
             elif "File Extensions with Errors:" in line_stripped:
                 line_type = "extension_header"
-                current_section = "extensions"
-                parsed_result = "Set current_section to 'extensions'"
+                parsed_result = "Extension header"
             elif "Sample Error Messages by Category:" in line_stripped:
                 line_type = "samples_header"
-                current_section = "samples"
-                parsed_result = "Set current_section to 'samples'"
-            elif current_section == "categories" and line_stripped.startswith("  "):
-                line_type = "potential_category_line"
-                try:
-                    # Check if it contains the expected format with colon and percentage
-                    if ":" in line_stripped and "(" in line_stripped and "%)" in line_stripped:
-                        # Split by colon to get name and value parts
-                        parts = line_stripped.split(":", 1)
-                        if len(parts) == 2:
-                            category_name = parts[0].strip()
-                            value_part = parts[1].strip()
-                            
-                            # Extract count and percentage
-                            count_parts = value_part.split(" (")
-                            if len(count_parts) == 2:
-                                count = int(count_parts[0].strip())
-                                percentage = float(count_parts[1].strip().rstrip("%)"))
-                                parsed_result = f"Category: {category_name}, Count: {count}, Percentage: {percentage}"
-                            else:
-                                parsed_result = f"Failed to split count parts: {value_part}"
-                        else:
-                            parsed_result = f"Failed to split by colon: {line_stripped}"
-                    else:
-                        parsed_result = f"Not a category line (missing : or % format): {line_stripped}"
-                except Exception as e:
-                    parsed_result = f"Error parsing: {str(e)}"
-            elif current_section == "extensions" and line_stripped.startswith("  "):
-                line_type = "potential_extension_line"
-                try:
-                    # Similar parsing check for extensions
-                    if ":" in line_stripped and "(" in line_stripped and "%)" in line_stripped:
-                        parsed_result = "Extension line format seems correct"
-                    else:
-                        parsed_result = f"Not an extension line (missing format): {line_stripped}"
-                except Exception as e:
-                    parsed_result = f"Error parsing: {str(e)}"
+                parsed_result = "Samples header"
+            elif line_text.startswith("  ") and (":" in line_stripped) and "(" in line_stripped and "%" in line_stripped:
+                # This could be either a category or extension line
+                if "File Extensions with Errors:" in output.split('\n')[0:i]:
+                    line_type = "extension_line"
+                    parsed_result = "Extension line"
+                else:
+                    line_type = "category_line"
+                    parsed_result = "Category line"
+            elif line_text.startswith("  ") and not line_text.startswith("    ") and line_stripped.endswith(":"):
+                line_type = "sample_category"
+                parsed_result = "Sample category"
+            elif line_text.startswith("    Sample"):
+                line_type = "sample_path"
+                parsed_result = "Sample path"
+            elif line_text.startswith("      Error:"):
+                line_type = "sample_error"
+                parsed_result = "Error message"
             
             parsing_details.append({
                 "line_num": i+1,
@@ -679,11 +649,11 @@ def error_analysis_test_page():
         
         for detail in parsing_details:
             row_class = ""
-            if "category" in detail["type"]:
+            if detail["type"] == "category_line":
                 row_class = "table-primary"
-            elif "extension" in detail["type"]:
+            elif detail["type"] == "extension_line":
                 row_class = "table-success"
-            elif "sample" in detail["type"]:
+            elif detail["type"] == "sample_category":
                 row_class = "table-info"
             elif "error" in detail["parsed"].lower():
                 row_class = "table-danger"
@@ -696,6 +666,29 @@ def error_analysis_test_page():
             html += "</tr>"
         
         html += "</tbody></table>"
+        html += "</div>"
+        
+        # Summary stats
+        html += "<h2 class='mt-4'>Data Summary</h2>"
+        html += "<div class='card'>"
+        html += "<div class='card-body'>"
+        html += f"<p><strong>Total Error Files:</strong> {error_data['total_errors']}</p>"
+        html += f"<p><strong>Categories Found:</strong> {len(error_data['categories'])}</p>"
+        if error_data['categories']:
+            html += "<ul>"
+            for cat in error_data['categories']:
+                html += f"<li>{cat['name']}: {cat['count']} ({cat['percentage']}%)</li>"
+            html += "</ul>"
+        
+        html += f"<p><strong>Extensions Found:</strong> {len(error_data['extensions'])}</p>"
+        if error_data['extensions']:
+            html += "<ul>"
+            for ext in error_data['extensions']:
+                html += f"<li>{ext['extension']}: {ext['count']} ({ext['percentage']}%)</li>"
+            html += "</ul>"
+        
+        html += f"<p><strong>Sample Categories Found:</strong> {len(error_data['samples'])}</p>"
+        html += "</div>"
         html += "</div>"
         
         # Raw output section
@@ -800,167 +793,6 @@ def api_config():
         'server_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     })
 
-def parse_error_analysis_output(output: str) -> Dict[str, Any]:
-    """Parse the text output from error analysis into structured data"""
-    lines = output.split('\n')
-    result = {
-        'total_errors': 0,
-        'categories': [],
-        'extensions': [],
-        'samples': {}
-    }
-    
-    current_section = None
-    current_category = None
-    
-    # Debug logging
-    logger.info(f"Parsing error analysis output with {len(lines)} lines")
-    
-    for i, line in enumerate(lines):
-        line = line.strip()
-        
-        if not line:
-            continue
-            
-        if "Total error files:" in line:
-            parts = line.split(": ")
-            if len(parts) == 2:
-                try:
-                    result['total_errors'] = int(parts[1])
-                    logger.debug(f"Found total errors: {result['total_errors']}")
-                except ValueError:
-                    logger.warning(f"Could not parse total errors from: {line}")
-                    result['total_errors'] = 0
-        
-        elif "Error Categories:" in line:
-            current_section = "categories"
-            logger.debug(f"Entering categories section at line {i+1}")
-        
-        elif "File Extensions with Errors:" in line:
-            current_section = "extensions"
-            logger.debug(f"Entering extensions section at line {i+1}")
-        
-        elif "Sample Error Messages by Category:" in line:
-            current_section = "samples"
-            logger.debug(f"Entering samples section at line {i+1}")
-        
-        elif current_section == "categories" and line.startswith("  "):
-            logger.debug(f"Processing potential category line: '{line}'")
-            try:
-                # Special case for "Temp Files", "Empty Files", etc. format
-                if ":" in line and "(" in line and "%)" in line:
-                    parts = line.split(":", 1)
-                    if len(parts) == 2:
-                        category_name = parts[0].strip()
-                        value_part = parts[1].strip()
-                        
-                        # Look for the format: "123 (45.6%)"
-                        if " (" in value_part and value_part.endswith("%)"):
-                            count_parts = value_part.split(" (")
-                            if len(count_parts) == 2:
-                                try:
-                                    count = int(count_parts[0].strip())
-                                    percentage = float(count_parts[1].strip().rstrip("%)"))
-                                    
-                                    result['categories'].append({
-                                        'name': category_name,
-                                        'count': count,
-                                        'percentage': percentage
-                                    })
-                                    logger.debug(f"Successfully parsed category: {category_name}, count: {count}, percentage: {percentage}")
-                                except ValueError as e:
-                                    logger.warning(f"Error parsing numbers in category line '{line}': {e}")
-                            else:
-                                logger.warning(f"Count parts not found in expected format: {value_part}")
-                        else:
-                            logger.warning(f"Value part doesn't match expected format: {value_part}")
-                    else:
-                        logger.warning(f"Failed to split category line by colon: {line}")
-                else:
-                    logger.warning(f"Line doesn't match category format (missing : or %): {line}")
-            except Exception as e:
-                logger.warning(f"Error parsing category line '{line}': {e}")
-        
-        elif current_section == "extensions" and line.startswith("  "):
-            logger.debug(f"Processing potential extension line: '{line}'")
-            try:
-                # Parse extension lines (similar to category lines)
-                if ":" in line and "(" in line and "%)" in line:
-                    parts = line.split(":", 1)
-                    if len(parts) == 2:
-                        extension = parts[0].strip()
-                        value_part = parts[1].strip()
-                        
-                        # Look for the format: "123 (45.6%)"
-                        if " (" in value_part and value_part.endswith("%)"):
-                            count_parts = value_part.split(" (")
-                            if len(count_parts) == 2:
-                                try:
-                                    count = int(count_parts[0].strip())
-                                    percentage = float(count_parts[1].strip().rstrip("%)"))
-                                    
-                                    result['extensions'].append({
-                                        'extension': extension,
-                                        'count': count,
-                                        'percentage': percentage
-                                    })
-                                    logger.debug(f"Successfully parsed extension: {extension}, count: {count}, percentage: {percentage}")
-                                except ValueError as e:
-                                    logger.warning(f"Error parsing numbers in extension line '{line}': {e}")
-                            else:
-                                logger.warning(f"Count parts not found in expected format: {value_part}")
-                        else:
-                            logger.warning(f"Value part doesn't match expected format: {value_part}")
-                    else:
-                        logger.warning(f"Failed to split extension line by colon: {line}")
-                else:
-                    logger.warning(f"Line doesn't match extension format (missing : or %): {line}")
-            except Exception as e:
-                logger.warning(f"Error parsing extension line '{line}': {e}")
-        
-        elif current_section == "samples" and line.startswith("  ") and not line.startswith("    "):
-            # New category in samples
-            if line.endswith(":"):
-                current_category = line.strip().rstrip(":")
-                result['samples'][current_category] = []
-                logger.debug(f"Found sample category: {current_category}")
-        
-        elif current_section == "samples" and current_category and line.startswith("    Sample"):
-            # Sample file path
-            try:
-                file_parts = line.replace("Sample", "").split(": ", 1)
-                if len(file_parts) > 1:
-                    file_path = file_parts[1].strip()
-                    result['samples'][current_category].append({
-                        'file_path': file_path,
-                        'error': None
-                    })
-                    logger.debug(f"Added sample file path: {file_path}")
-            except Exception as e:
-                logger.warning(f"Error parsing sample line '{line}': {e}")
-        
-        elif current_section == "samples" and current_category and line.startswith("      Error:"):
-            # Error message for the last sample
-            try:
-                error_parts = line.split(": ", 1)
-                if len(error_parts) > 1:
-                    error_msg = error_parts[1].strip()
-                    if result['samples'][current_category]:
-                        result['samples'][current_category][-1]['error'] = error_msg
-                        logger.debug(f"Added error message: {error_msg}")
-            except Exception as e:
-                logger.warning(f"Error parsing error message line '{line}': {e}")
-    
-    # Ensure we have at least empty arrays/objects for all keys
-    result.setdefault('categories', [])
-    result.setdefault('extensions', [])
-    result.setdefault('samples', {})
-    
-    # Log summary of parsed data
-    logger.info(f"Parsing complete. Found {result['total_errors']} errors, {len(result['categories'])} categories, {len(result['extensions'])} extensions")
-    
-    return result
-
 @app.route('/static/<path:path>')
 def send_static(path):
     """Serve static files"""
@@ -979,16 +811,16 @@ def api_test_error_analysis():
         # Create a custom connection with row factory
         conn = db.conn
         
-        # Capture stdout to get the text output
+        # Get JSON output directly
+        json_data = inspect_db.analyze_error_files(conn, output_format='json')
+        
+        # Get text output for debugging
         import io
         from contextlib import redirect_stdout
         
         with io.StringIO() as buf, redirect_stdout(buf):
-            inspect_db.analyze_error_files(conn)
+            inspect_db.analyze_error_files(conn, output_format='text')
             raw_output = buf.getvalue()
-        
-        # Parse the output
-        parsed_data = parse_error_analysis_output(raw_output)
         
         # Add line-by-line parsing information for debugging
         lines = raw_output.split('\n')
@@ -1031,12 +863,12 @@ def api_test_error_analysis():
             'status': 'success',
             'db_path': db_path,
             'raw_output': raw_output,
-            'parsed_data': parsed_data,
+            'parsed_data': json_data,
             'total_lines': len(lines),
             'parsing_details': lines_with_type,
-            'categories_count': len(parsed_data['categories']),
-            'extensions_count': len(parsed_data['extensions']),
-            'samples_count': len(parsed_data['samples'])
+            'categories_count': len(json_data['categories']),
+            'extensions_count': len(json_data['extensions']),
+            'samples_count': len(json_data['samples'])
         })
     except Exception as e:
         logger.error(f"Error testing error analysis: {str(e)}", exc_info=True)

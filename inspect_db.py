@@ -14,7 +14,7 @@ from collections import defaultdict
 # Options for excluding files
 min_file_size = 100  # Minimum file size in bytes to consider for reset
 
-def inspect_database(db_path, show_processing_speed=False, time_window=30, review_errors=False, reset_errors=False):
+def inspect_database(db_path, show_processing_speed=False, time_window=30, review_errors=False, reset_errors=False, error_output_format='text'):
     """Inspect database and print relevant information"""
     if not os.path.exists(db_path):
         print(f"Error: Database file {db_path} not found")
@@ -107,7 +107,10 @@ def inspect_database(db_path, show_processing_speed=False, time_window=30, revie
     
     # Analyze error files if requested
     if review_errors:
-        analyze_error_files(conn)
+        result = analyze_error_files(conn, output_format=error_output_format)
+        if error_output_format == 'json':
+            print(json.dumps(result, indent=2))
+            return result
     
     # Processing speed statistics
     if show_processing_speed:
@@ -392,25 +395,45 @@ def reset_error_files(conn):
     print(f"Excluded {total_excluded} files ({exclusion_str})")
     print(f"Files will be reprocessed on the next run of process_files.py")
 
-def analyze_error_files(conn):
+def analyze_error_files(conn, output_format='text'):
     """
     Analyze files with error status to categorize common error patterns
     
     Args:
         conn: SQLite database connection
+        output_format: Output format ('text' or 'json')
+        
+    Returns:
+        If output_format is 'json', returns a dict with error analysis data
+        Otherwise, prints to stdout and returns None
     """
-    print("\n=== ERROR FILE ANALYSIS ===")
+    # Create a dictionary to hold all results if JSON output is requested
+    result_data = {
+        'total_errors': 0,
+        'categories': [],
+        'extensions': [],
+        'samples': {}
+    }
+    
+    if output_format == 'text':
+        print("\n=== ERROR FILE ANALYSIS ===")
     
     cursor = conn.cursor()
     
     # Get count of error files
     cursor.execute("SELECT COUNT(*) as count FROM files WHERE status = 'error'")
     error_count = cursor.fetchone()['count']
-    print(f"Total error files: {error_count}")
+    
+    # Store error count
+    result_data['total_errors'] = error_count
+    
+    if output_format == 'text':
+        print(f"Total error files: {error_count}")
     
     if error_count == 0:
-        print("No error files to analyze")
-        return
+        if output_format == 'text':
+            print("No error files to analyze")
+        return result_data if output_format == 'json' else None
     
     # Query error files with their error messages
     cursor.execute("""
@@ -511,32 +534,74 @@ def analyze_error_files(conn):
             if len(error_samples['other']) < max_samples:
                 error_samples['other'].append((file_path, error_msg))
     
-    # Print error category statistics
-    print("\nError Categories:")
+    # Process the categories for output
+    if output_format == 'text':
+        print("\nError Categories:")
+    
     for category, count in categories.items():
         if count > 0:
             percentage = (count / error_count) * 100
-            print(f"  {category.replace('_', ' ').title()}: {count} ({percentage:.1f}%)")
+            if output_format == 'text':
+                print(f"  {category.replace('_', ' ').title()}: {count} ({percentage:.1f}%)")
+            
+            # Add to JSON data
+            result_data['categories'].append({
+                'name': category.replace('_', ' ').title(),
+                'count': count,
+                'percentage': round(percentage, 1)
+            })
     
-    # Print file extension statistics for errors
-    print("\nFile Extensions with Errors:")
+    # Process the extension statistics for output
+    if output_format == 'text':
+        print("\nFile Extensions with Errors:")
+    
     total_ext = sum(ext_stats.values())
     for ext, count in sorted(ext_stats.items(), key=lambda x: x[1], reverse=True)[:20]:  # Top 20
         if count > 0:
             percentage = (count / total_ext) * 100
-            print(f"  {ext or '(no extension)'}: {count} ({percentage:.1f}%)")
+            if output_format == 'text':
+                print(f"  {ext or '(no extension)'}: {count} ({percentage:.1f}%)")
+            
+            # Add to JSON data
+            result_data['extensions'].append({
+                'extension': ext or '(no extension)',
+                'count': count,
+                'percentage': round(percentage, 1)
+            })
     
-    # Print sample error messages for each category
-    print("\nSample Error Messages by Category:")
+    # Process sample error messages for output
+    if output_format == 'text':
+        print("\nSample Error Messages by Category:")
+    
     for category, samples in error_samples.items():
         if samples:
-            print(f"\n  {category.replace('_', ' ').title()}:")
+            category_name = category.replace('_', ' ').title()
+            if output_format == 'text':
+                print(f"\n  {category_name}:")
+            
+            # Add to JSON data
+            result_data['samples'][category_name] = []
+            
             for i, (file_path, error_msg) in enumerate(samples[:max_samples]):
-                # Truncate long paths and messages
+                # Truncate long paths and messages for text output
                 trunc_path = (file_path[:60] + '...') if len(file_path) > 60 else file_path
                 trunc_msg = (error_msg[:100] + '...') if len(error_msg) > 100 else error_msg
-                print(f"    Sample {i+1}: {trunc_path}")
-                print(f"      Error: {trunc_msg}")
+                
+                if output_format == 'text':
+                    print(f"    Sample {i+1}: {trunc_path}")
+                    print(f"      Error: {trunc_msg}")
+                
+                # Add full paths and messages to JSON data
+                result_data['samples'][category_name].append({
+                    'file_path': file_path,
+                    'error': error_msg
+                })
+    
+    # Return the JSON data if requested
+    if output_format == 'json':
+        return result_data
+    
+    return None
 
 def main():
     parser = argparse.ArgumentParser(description="Inspect PII Analyzer database")
@@ -552,6 +617,8 @@ def main():
                       help='Reset error files back to pending status so they can be reprocessed')
     parser.add_argument('--min-size', type=int, default=100,
                       help='Minimum file size in bytes to reset when using --reset-errors (default: 100)')
+    parser.add_argument('--format', type=str, choices=['text', 'json'], default='text',
+                      help='Output format for error analysis (default: text)')
     args = parser.parse_args()
     
     # If min-size is provided, modify the global variable
@@ -560,7 +627,7 @@ def main():
         global min_file_size
         min_file_size = args.min_size
     
-    inspect_database(args.db_path, args.show_speed, args.time_window, args.review_errors, args.reset_errors)
+    inspect_database(args.db_path, args.show_speed, args.time_window, args.review_errors, args.reset_errors, args.format)
 
 if __name__ == "__main__":
     main() 
