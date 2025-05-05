@@ -356,7 +356,7 @@ def reset_error_files(conn):
     
     total_excluded = sum(excluded_counts.values())
     print(f"Successfully reset {reset_count} files from 'error' to 'pending' status")
-    print(f"Excluded {total_excluded} files ({', '.join([f'{count} {cat.replace('_', ' ')}' for cat, count in excluded_counts.items()])})")
+    print(f"Excluded {total_excluded} files ({', '.join([f'{count} {cat.replace("_", " ")}' for cat, count in excluded_counts.items()])})")
     print(f"Files will be reprocessed on the next run of process_files.py")
 
 def analyze_error_files(conn):
