@@ -9,6 +9,7 @@ let dbPath = null; // Will be determined by the server or URL parameter
 let autoRefreshEnabled = true; // Auto-refresh enabled by default
 let authRequired = false; // Whether authentication is required
 let authToken = null; // Authentication token (password) for API requests
+let isDarkMode = false; // Dark mode detection
 
 // DOM Elements
 const elements = {
@@ -64,6 +65,12 @@ const elements = {
 
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', function() {
+    // Check for dark mode
+    checkDarkMode();
+    
+    // Listen for changes in color scheme
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', checkDarkMode);
+    
     // Set up event listeners
     elements.refreshButton.addEventListener('click', refreshDashboard);
     elements.jobSelector.addEventListener('change', changeJob);
@@ -134,6 +141,42 @@ document.addEventListener('DOMContentLoaded', function() {
         startRefreshTimer();
     }
 });
+
+// Check if system is in dark mode
+function checkDarkMode() {
+    isDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    console.log(`System color scheme: ${isDarkMode ? 'dark' : 'light'}`);
+    
+    // Update Chart.js defaults for the current color scheme
+    updateChartDefaults();
+    
+    // Refresh any existing charts
+    refreshCharts();
+}
+
+// Update Chart.js defaults based on color scheme
+function updateChartDefaults() {
+    if (isDarkMode) {
+        Chart.defaults.color = '#f8f9fa';
+        Chart.defaults.borderColor = '#495057';
+    } else {
+        Chart.defaults.color = '#212529';
+        Chart.defaults.borderColor = '#e9ecef';
+    }
+}
+
+// Refresh all charts with new color scheme
+function refreshCharts() {
+    // Only attempt to refresh if charts exist
+    if (Object.keys(charts).length > 0) {
+        // Destroy and recreate charts when needed
+        for (const chartName in charts) {
+            if (charts[chartName]) {
+                charts[chartName].update();
+            }
+        }
+    }
+}
 
 // Fetch server configuration
 function fetchConfig() {
