@@ -3,9 +3,10 @@
 // Global variables
 let charts = {};
 let currentJobId = null;
-let refreshInterval = 30000; // Default refresh interval: 30 seconds
+let refreshInterval = 600000; // 10 minutes refresh interval
 let refreshTimer = null;
 let dbPath = null; // Will be determined by the server or URL parameter
+let autoRefreshEnabled = true; // Auto-refresh enabled by default
 
 // DOM Elements
 const elements = {
@@ -18,6 +19,7 @@ const elements = {
     // Controls
     jobSelector: document.getElementById('jobSelector'),
     refreshButton: document.getElementById('refreshButton'),
+    autoRefreshToggle: document.getElementById('autoRefreshToggle'),
     
     // Job information
     jobName: document.getElementById('jobName'),
@@ -64,6 +66,19 @@ document.addEventListener('DOMContentLoaded', function() {
     elements.refreshButton.addEventListener('click', refreshDashboard);
     elements.jobSelector.addEventListener('change', changeJob);
     
+    // Set up auto-refresh toggle if it exists
+    if (elements.autoRefreshToggle) {
+        elements.autoRefreshToggle.checked = autoRefreshEnabled;
+        elements.autoRefreshToggle.addEventListener('change', toggleAutoRefresh);
+        
+        // Update the label to show current refresh interval
+        const minutes = Math.floor(refreshInterval / 60000);
+        const autoRefreshLabel = document.getElementById('autoRefreshLabel');
+        if (autoRefreshLabel) {
+            autoRefreshLabel.textContent = `Auto-refresh (${minutes} min)`;
+        }
+    }
+    
     // First, check for URL parameter
     const urlParams = new URLSearchParams(window.location.search);
     if (urlParams.has('db_path')) {
@@ -95,8 +110,23 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     // Set up auto-refresh
-    startRefreshTimer();
+    if (autoRefreshEnabled) {
+        startRefreshTimer();
+    }
 });
+
+// Toggle auto-refresh
+function toggleAutoRefresh() {
+    autoRefreshEnabled = elements.autoRefreshToggle.checked;
+    
+    if (autoRefreshEnabled) {
+        startRefreshTimer();
+        console.log(`Auto-refresh enabled with interval of ${refreshInterval/1000} seconds`);
+    } else {
+        stopRefreshTimer();
+        console.log('Auto-refresh disabled');
+    }
+}
 
 // Load available jobs
 function loadJobs() {
@@ -757,19 +787,28 @@ function startRefreshTimer() {
         clearTimeout(refreshTimer);
     }
     
-    refreshTimer = setTimeout(function() {
-        loadDashboardData();
-        startRefreshTimer();
-    }, refreshInterval);
+    if (autoRefreshEnabled) {
+        refreshTimer = setTimeout(function() {
+            loadDashboardData();
+            startRefreshTimer();
+        }, refreshInterval);
+    }
+}
+
+// Stop refresh timer
+function stopRefreshTimer() {
+    if (refreshTimer) {
+        clearTimeout(refreshTimer);
+        refreshTimer = null;
+    }
 }
 
 // Reset refresh timer
 function resetRefreshTimer() {
-    if (refreshTimer) {
-        clearTimeout(refreshTimer);
+    if (autoRefreshEnabled) {
+        stopRefreshTimer();
+        startRefreshTimer();
     }
-    
-    startRefreshTimer();
 }
 
 // Utility: Lighten a color by percentage

@@ -44,6 +44,17 @@ html, body {
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
 }
 
+/* Auto-refresh toggle styling */
+.form-check-input:checked {
+    background-color: #ffffff;
+    border-color: #ffffff;
+}
+
+.form-check-label {
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+
 /* Pre formatting for executive summary */
 pre.pre-scrollable {
     max-height: 300px;
@@ -73,6 +84,10 @@ pre.pre-scrollable {
     
     .card-header h4 {
         font-size: 1.2rem;
+    }
+    
+    .form-check-label {
+        font-size: 0.75rem;
     }
 }
 

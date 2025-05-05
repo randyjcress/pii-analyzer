@@ -33,10 +33,14 @@
                         <a class="nav-link" href="#errors">Error Analysis</a>
                     </li>
                 </ul>
-                <div class="d-flex">
+                <div class="d-flex align-items-center">
                     <select id="jobSelector" class="form-select me-2">
                         <option value="">Loading jobs...</option>
                     </select>
+                    <div class="form-check form-switch me-2">
+                        <input class="form-check-input" type="checkbox" role="switch" id="autoRefreshToggle" checked>
+                        <label class="form-check-label text-light" for="autoRefreshToggle" id="autoRefreshLabel">Auto-refresh (10 min)</label>
+                    </div>
                     <button id="refreshButton" class="btn btn-light">
                         <i class="bi bi-arrow-clockwise"></i> Refresh
                     </button>
