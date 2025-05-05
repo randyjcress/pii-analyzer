@@ -69,7 +69,13 @@ document.addEventListener('DOMContentLoaded', function() {
     checkDarkMode();
     
     // Listen for changes in color scheme
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', checkDarkMode);
+    const darkModeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    if (darkModeMediaQuery.addEventListener) {
+        darkModeMediaQuery.addEventListener('change', checkDarkMode);
+    } else if (darkModeMediaQuery.addListener) {
+        // Fallback for older browsers
+        darkModeMediaQuery.addListener(checkDarkMode);
+    }
     
     // Set up event listeners
     elements.refreshButton.addEventListener('click', refreshDashboard);
@@ -144,37 +150,52 @@ document.addEventListener('DOMContentLoaded', function() {
 
 // Check if system is in dark mode
 function checkDarkMode() {
-    isDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    console.log(`System color scheme: ${isDarkMode ? 'dark' : 'light'}`);
-    
-    // Update Chart.js defaults for the current color scheme
-    updateChartDefaults();
-    
-    // Refresh any existing charts
-    refreshCharts();
+    try {
+        isDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        console.log(`System color scheme: ${isDarkMode ? 'dark' : 'light'}`);
+        
+        // Update Chart.js defaults for the current color scheme
+        updateChartDefaults();
+        
+        // Only refresh charts if they exist
+        if (Object.keys(charts).length > 0) {
+            refreshCharts();
+        }
+    } catch (error) {
+        console.error('Error detecting dark mode:', error);
+        // Don't let dark mode detection break the entire app
+        isDarkMode = false;
+    }
 }
 
 // Update Chart.js defaults based on color scheme
 function updateChartDefaults() {
-    if (isDarkMode) {
-        Chart.defaults.color = '#f8f9fa';
-        Chart.defaults.borderColor = '#495057';
-    } else {
-        Chart.defaults.color = '#212529';
-        Chart.defaults.borderColor = '#e9ecef';
+    try {
+        if (window.Chart) {
+            if (isDarkMode) {
+                Chart.defaults.color = '#f8f9fa';
+                Chart.defaults.borderColor = '#495057';
+            } else {
+                Chart.defaults.color = '#212529';
+                Chart.defaults.borderColor = '#e9ecef';
+            }
+        }
+    } catch (error) {
+        console.error('Error updating chart defaults:', error);
     }
 }
 
 // Refresh all charts with new color scheme
 function refreshCharts() {
-    // Only attempt to refresh if charts exist
-    if (Object.keys(charts).length > 0) {
-        // Destroy and recreate charts when needed
+    try {
+        // Only attempt to refresh if charts exist and are valid
         for (const chartName in charts) {
-            if (charts[chartName]) {
+            if (charts[chartName] && typeof charts[chartName].update === 'function') {
                 charts[chartName].update();
             }
         }
+    } catch (error) {
+        console.error('Error refreshing charts:', error);
     }
 }
 
@@ -490,6 +511,11 @@ function updateFileTypesChart(fileTypes) {
             borderWidth: 0
         }
     });
+    
+    // Apply dark mode to new chart if needed
+    if (isDarkMode) {
+        updateChartDefaults();
+    }
 }
 
 // Update entity types table
