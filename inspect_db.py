@@ -11,6 +11,9 @@ import argparse
 from datetime import datetime, timedelta
 from collections import defaultdict
 
+# Options for excluding files
+min_file_size = 100  # Minimum file size in bytes to consider for reset
+
 def inspect_database(db_path, show_processing_speed=False, time_window=30, review_errors=False, reset_errors=False):
     """Inspect database and print relevant information"""
     if not os.path.exists(db_path):
@@ -278,7 +281,16 @@ def reset_error_files(conn):
     
     # Get count of error files
     cursor.execute("SELECT COUNT(*) as count FROM files WHERE status = 'error'")
-    error_count = cursor.fetchone()['count']
+    result = cursor.fetchone()
+    
+    # Handle both SQLite Row objects and regular tuples
+    if hasattr(result, 'keys'):
+        # This is an SQLite Row object with named columns
+        error_count = result['count']
+    else:
+        # This is a regular tuple
+        error_count = result[0]
+    
     print(f"Total error files to reset: {error_count}")
     
     if error_count == 0:
@@ -288,7 +300,6 @@ def reset_error_files(conn):
     # Options to exclude certain files
     exclude_temp_files = True  # Skip resetting temporary Office files (starting with ~$)
     exclude_small_files = True  # Skip resetting small/empty files
-    min_file_size = 100  # Minimum file size in bytes to consider for reset (files smaller than this will be skipped)
     
     # Optional: Allow filtering by job ID
     # job_id = None  # Set to a specific job ID to only reset errors for that job
@@ -304,7 +315,14 @@ def reset_error_files(conn):
         SELECT COUNT(*) as count FROM files 
         WHERE status = 'error' AND file_path LIKE '%/~$%'
         """)
-        temp_count = cursor.fetchone()['count']
+        result = cursor.fetchone()
+        
+        # Handle both SQLite Row objects and regular tuples
+        if hasattr(result, 'keys'):
+            temp_count = result['count']
+        else:
+            temp_count = result[0]
+            
         excluded_counts["temp_files"] = temp_count
         conditions.append("file_path NOT LIKE '%/~$%'")
     
@@ -315,7 +333,14 @@ def reset_error_files(conn):
         SELECT COUNT(*) as count FROM files 
         WHERE status = 'error' AND (file_size IS NULL OR file_size <= ?)
         """, (min_file_size,))
-        small_count = cursor.fetchone()['count']
+        result = cursor.fetchone()
+        
+        # Handle both SQLite Row objects and regular tuples
+        if hasattr(result, 'keys'):
+            small_count = result['count']
+        else:
+            small_count = result[0]
+            
         excluded_counts["small_files"] = small_count
         conditions.append(f"(file_size > {min_file_size})")
     
@@ -356,7 +381,15 @@ def reset_error_files(conn):
     
     total_excluded = sum(excluded_counts.values())
     print(f"Successfully reset {reset_count} files from 'error' to 'pending' status")
-    print(f"Excluded {total_excluded} files ({', '.join([f'{count} {cat.replace("_", " ")}' for cat, count in excluded_counts.items()])})")
+    
+    # Simplified version without nested f-strings to avoid syntax errors
+    exclusion_details = []
+    for cat, count in excluded_counts.items():
+        cat_name = cat.replace('_', ' ')
+        exclusion_details.append(f"{count} {cat_name}")
+    
+    exclusion_str = ", ".join(exclusion_details)
+    print(f"Excluded {total_excluded} files ({exclusion_str})")
     print(f"Files will be reprocessed on the next run of process_files.py")
 
 def analyze_error_files(conn):
