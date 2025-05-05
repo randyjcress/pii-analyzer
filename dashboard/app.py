@@ -339,6 +339,7 @@ def api_error_analysis():
     
     try:
         # Connect to database
+        logger.info(f"Running error analysis on database: {db_path}")
         db = get_database(db_path)
         
         # Create a custom connection with row factory
@@ -357,12 +358,35 @@ def api_error_analysis():
         
         # Debug logging
         logger.info(f"Error analysis completed for {db_path}")
-        logger.debug(f"Error data structure: {error_data}")
+        logger.info(f"Found {error_data['total_errors']} total errors")
+        logger.info(f"Parsed {len(error_data['categories'])} categories and {len(error_data['extensions'])} extensions")
+        
+        # Log each category and extension for debugging
+        for category in error_data['categories']:
+            logger.debug(f"Category: {category['name']}, Count: {category['count']}, Percentage: {category['percentage']}")
+        
+        for extension in error_data['extensions']:
+            logger.debug(f"Extension: {extension['extension']}, Count: {extension['count']}, Percentage: {extension['percentage']}")
+        
+        # Validate the parsed data
+        if error_data['total_errors'] > 0 and (not error_data['categories'] or not error_data['extensions']):
+            logger.warning(f"Parsing issue: Found {error_data['total_errors']} errors but no categories or extensions")
+            # Add raw output for debugging in case of issues
+            error_data['_debug'] = {
+                'raw_output': output,
+                'parsing_warning': 'Found errors but no categories or extensions'
+            }
         
         return jsonify({
             'status': 'success',
             'error_analysis': error_data,
-            'raw_output': output
+            'meta': {
+                'database': db_path,
+                'timestamp': datetime.now().isoformat(),
+                'categories_count': len(error_data['categories']),
+                'extensions_count': len(error_data['extensions']),
+                'samples_count': len(error_data['samples'])
+            }
         })
     except Exception as e:
         logger.error(f"Error analyzing errors: {str(e)}", exc_info=True)
@@ -391,10 +415,40 @@ def api_error_analysis_debug():
             inspect_db.analyze_error_files(conn)
             output = buf.getvalue()
         
+        # Parse the output and include parsing details
+        error_data = parse_error_analysis_output(output)
+        
+        # Add parsing markers for debugging
+        parsed_lines = []
+        for i, line in enumerate(output.split('\n')):
+            if line.strip():
+                line_type = "unknown"
+                if "Total error files:" in line:
+                    line_type = "total_count"
+                elif "Error Categories:" in line:
+                    line_type = "category_header"
+                elif "File Extensions with Errors:" in line:
+                    line_type = "extension_header"
+                elif "Sample Error Messages by Category:" in line:
+                    line_type = "samples_header"
+                elif line.strip().startswith("  ") and not line.strip().startswith("    "):
+                    if ":" in line:
+                        if any(c in line for c in ["(", ")"]):
+                            if "File Extensions with Errors:" in output.split('\n')[0:i]:
+                                line_type = "extension_line"
+                            else:
+                                line_type = "category_line"
+                        elif line.strip().endswith(":"):
+                            line_type = "sample_category"
+                
+                parsed_lines.append({"line": line, "type": line_type, "line_num": i+1})
+        
         return jsonify({
             'status': 'success',
             'raw_output': output,
-            'db_path': db_path
+            'db_path': db_path,
+            'parsed_data': error_data,
+            'parsing_details': parsed_lines
         })
     except Exception as e:
         logger.error(f"Error in debug endpoint: {str(e)}", exc_info=True)
@@ -402,6 +456,243 @@ def api_error_analysis_debug():
             'error': str(e),
             'status': 'error'
         }), 500
+
+@app.route('/api/error_analysis_direct')
+def api_error_analysis_direct():
+    """Direct test endpoint to analyze error files and return parsed data"""
+    db_path = request.args.get('db_path', os.environ.get('PII_DB_PATH', 'pii_results.db'))
+    
+    try:
+        # Connect to database
+        logger.info(f"Direct error analysis test on database: {db_path}")
+        db = get_database(db_path)
+        conn = db.conn
+        
+        # Capture stdout to get the text output
+        import io
+        from contextlib import redirect_stdout
+        
+        with io.StringIO() as buf, redirect_stdout(buf):
+            inspect_db.analyze_error_files(conn)
+            output = buf.getvalue()
+        
+        # Parse the output
+        error_data = parse_error_analysis_output(output)
+        
+        # Add raw output for debugging
+        error_data['_raw_output'] = output
+        
+        # Log detail of what we're parsing
+        logger.info(f"Parsed error data with {len(error_data['categories'])} categories and {len(error_data['extensions'])} extensions")
+        
+        # Debug logging for categories
+        for category in error_data['categories']:
+            logger.info(f"Category: {category['name']}, Count: {category['count']}")
+        
+        # Debug logging for extensions
+        for extension in error_data['extensions']:
+            logger.info(f"Extension: {extension['extension']}, Count: {extension['count']}")
+        
+        return jsonify({
+            'status': 'success',
+            'error_analysis': error_data
+        })
+    except Exception as e:
+        logger.error(f"Error in direct error analysis: {str(e)}", exc_info=True)
+        return jsonify({
+            'error': str(e),
+            'status': 'error'
+        }), 500
+
+@app.route('/error_analysis_test')
+def error_analysis_test_page():
+    """Test page to display error analysis results directly"""
+    db_path = request.args.get('db_path', os.environ.get('PII_DB_PATH', 'pii_results.db'))
+    
+    try:
+        # Connect to database and run analysis
+        db = get_database(db_path)
+        conn = db.conn
+        
+        # Capture stdout
+        import io
+        from contextlib import redirect_stdout
+        
+        with io.StringIO() as buf, redirect_stdout(buf):
+            inspect_db.analyze_error_files(conn)
+            output = buf.getvalue()
+        
+        # Parse the output
+        error_data = parse_error_analysis_output(output)
+        
+        # Build HTML directly
+        html = "<html><head><title>Error Analysis Test</title>"
+        html += "<link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css' rel='stylesheet'>"
+        html += "<script src='https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js'></script>"
+        html += "</head><body>"
+        html += "<div class='container mt-4'>"
+        
+        # Header
+        html += "<h1>Error Analysis Test</h1>"
+        html += f"<p>Database: {db_path}</p>"
+        
+        # Total errors
+        html += f"<div class='alert alert-info'>Total error files: {error_data['total_errors']}</div>"
+        
+        # Categories
+        html += "<h2>Error Categories</h2>"
+        if error_data['categories']:
+            html += "<div class='row'>"
+            html += "<div class='col-md-6'>"
+            html += "<canvas id='categoriesChart' width='400' height='300'></canvas>"
+            html += "</div>"
+            html += "<div class='col-md-6'>"
+            html += "<table class='table table-striped'>"
+            html += "<thead><tr><th>Category</th><th>Count</th><th>Percentage</th></tr></thead>"
+            html += "<tbody>"
+            for category in error_data['categories']:
+                html += f"<tr><td>{category['name']}</td><td>{category['count']}</td><td>{category['percentage']}%</td></tr>"
+            html += "</tbody></table>"
+            html += "</div>"
+            html += "</div>"
+        else:
+            html += "<div class='alert alert-warning'>No category data available</div>"
+        
+        # Extensions
+        html += "<h2 class='mt-4'>File Extensions with Errors</h2>"
+        if error_data['extensions']:
+            html += "<div class='row'>"
+            html += "<div class='col-md-6'>"
+            html += "<canvas id='extensionsChart' width='400' height='300'></canvas>"
+            html += "</div>"
+            html += "<div class='col-md-6'>"
+            html += "<table class='table table-striped'>"
+            html += "<thead><tr><th>Extension</th><th>Count</th><th>Percentage</th></tr></thead>"
+            html += "<tbody>"
+            for ext in error_data['extensions']:
+                html += f"<tr><td>{ext['extension']}</td><td>{ext['count']}</td><td>{ext['percentage']}%</td></tr>"
+            html += "</tbody></table>"
+            html += "</div>"
+            html += "</div>"
+        else:
+            html += "<div class='alert alert-warning'>No extension data available</div>"
+        
+        # Samples
+        html += "<h2 class='mt-4'>Error Samples</h2>"
+        if error_data['samples']:
+            for category, samples in error_data['samples'].items():
+                html += f"<h3 class='mt-3'>{category}</h3>"
+                html += "<ul class='list-group'>"
+                for sample in samples[:3]:  # Limit to 3 samples per category
+                    html += "<li class='list-group-item'>"
+                    html += f"<div><strong>File:</strong> {sample['file_path']}</div>"
+                    html += f"<div class='text-danger'>Error: {sample['error'] or 'No error message'}</div>"
+                    html += "</li>"
+                html += "</ul>"
+        else:
+            html += "<div class='alert alert-warning'>No error samples available</div>"
+        
+        # Raw output section
+        html += "<h2 class='mt-4'>Raw Output</h2>"
+        html += "<pre class='bg-light p-3'>" + output + "</pre>"
+        
+        # JavaScript for charts
+        html += """
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Categories chart
+            if (document.getElementById('categoriesChart')) {
+                const categoryLabels = [];
+                const categoryData = [];
+                const categoryColors = [
+                    '#4e73df', '#1cc88a', '#36b9cc', '#f6c23e', '#e74a3b', 
+                    '#6f42c1', '#5a5c69', '#858796', '#f8f9fc', '#d1d3e2'
+                ];
+        """
+        
+        # Add category data
+        if error_data['categories']:
+            for i, category in enumerate(error_data['categories']):
+                html += f"categoryLabels.push('{category['name']}');\n"
+                html += f"categoryData.push({category['count']});\n"
+        
+        html += """
+                new Chart(document.getElementById('categoriesChart'), {
+                    type: 'pie',
+                    data: {
+                        labels: categoryLabels,
+                        datasets: [{
+                            data: categoryData,
+                            backgroundColor: categoryColors
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: {
+                                position: 'right'
+                            }
+                        }
+                    }
+                });
+            }
+            
+            // Extensions chart
+            if (document.getElementById('extensionsChart')) {
+                const extLabels = [];
+                const extData = [];
+                const extColors = [
+                    '#4e73df', '#1cc88a', '#36b9cc', '#f6c23e', '#e74a3b', 
+                    '#6f42c1', '#5a5c69', '#858796', '#f8f9fc', '#d1d3e2'
+                ];
+        """
+        
+        # Add extension data
+        if error_data['extensions']:
+            for i, ext in enumerate(sorted(error_data['extensions'], key=lambda x: x['count'], reverse=True)[:10]):
+                html += f"extLabels.push('{ext['extension']}');\n"
+                html += f"extData.push({ext['count']});\n"
+        
+        html += """
+                new Chart(document.getElementById('extensionsChart'), {
+                    type: 'bar',
+                    data: {
+                        labels: extLabels,
+                        datasets: [{
+                            label: 'Error Count',
+                            data: extData,
+                            backgroundColor: extColors
+                        }]
+                    },
+                    options: {
+                        indexAxis: 'y',
+                        responsive: true
+                    }
+                });
+            }
+        });
+        </script>
+        """
+        
+        html += "</div></body></html>"
+        
+        return html
+        
+    except Exception as e:
+        logger.error(f"Error in test page: {str(e)}", exc_info=True)
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
+@app.route('/api/config')
+def api_config():
+    """API endpoint to get server configuration"""
+    db_path = os.environ.get('PII_DB_PATH', 'pii_results.db')
+    
+    return jsonify({
+        'status': 'success',
+        'db_path': db_path,
+        'auth_required': password_required,
+        'server_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    })
 
 def parse_error_analysis_output(output: str) -> Dict[str, Any]:
     """Parse the text output from error analysis into structured data"""
@@ -441,39 +732,50 @@ def parse_error_analysis_output(output: str) -> Dict[str, Any]:
             current_section = "samples"
         
         elif current_section == "categories" and line.startswith("  "):
-            # Parse category lines
-            parts = line.split(": ")
-            if len(parts) == 2:
-                category_parts = parts[1].split(" (")
-                if len(category_parts) == 2:
-                    try:
-                        count = int(category_parts[0])
-                        percentage = float(category_parts[1].rstrip("%)"))
+            # Parse category lines like "  category_name: 123 (45.6%)"
+            try:
+                # Split by colon to get name and value parts
+                parts = line.split(":", 1)
+                if len(parts) == 2:
+                    category_name = parts[0].strip()
+                    value_part = parts[1].strip()
+                    
+                    # Extract count and percentage
+                    count_parts = value_part.split(" (")
+                    if len(count_parts) == 2:
+                        count = int(count_parts[0].strip())
+                        percentage = float(count_parts[1].strip().rstrip("%)"))
                         result['categories'].append({
-                            'name': parts[0].strip(),
+                            'name': category_name,
                             'count': count,
                             'percentage': percentage
                         })
-                    except (ValueError, IndexError) as e:
-                        logger.warning(f"Error parsing category line '{line}': {e}")
+                        logger.debug(f"Parsed category: {category_name}, count: {count}, percentage: {percentage}")
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Error parsing category line '{line}': {e}")
         
         elif current_section == "extensions" and line.startswith("  "):
-            # Parse extension lines
-            parts = line.split(": ")
-            if len(parts) == 2:
-                ext_parts = parts[1].split(" (")
-                if len(ext_parts) == 2:
-                    try:
-                        count_part = ext_parts[0].split(" ")[0]
-                        count = int(count_part)
-                        percentage = float(ext_parts[1].rstrip("%)"))
+            # Parse extension lines like "  .ext: 123 (45.6%)"
+            try:
+                # Split by colon to get extension and value parts
+                parts = line.split(":", 1)
+                if len(parts) == 2:
+                    extension = parts[0].strip()
+                    value_part = parts[1].strip()
+                    
+                    # Extract count and percentage
+                    count_parts = value_part.split(" (")
+                    if len(count_parts) == 2:
+                        count = int(count_parts[0].strip())
+                        percentage = float(count_parts[1].strip().rstrip("%)"))
                         result['extensions'].append({
-                            'extension': parts[0].strip(),
+                            'extension': extension,
                             'count': count,
                             'percentage': percentage
                         })
-                    except (ValueError, IndexError) as e:
-                        logger.warning(f"Error parsing extension line '{line}': {e}")
+                        logger.debug(f"Parsed extension: {extension}, count: {count}, percentage: {percentage}")
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Error parsing extension line '{line}': {e}")
         
         elif current_section == "samples" and line.startswith("  ") and not line.startswith("    "):
             # New category in samples
@@ -506,22 +808,89 @@ def parse_error_analysis_output(output: str) -> Dict[str, Any]:
     
     return result
 
-@app.route('/api/config')
-def api_config():
-    """API endpoint to get server configuration"""
-    db_path = os.environ.get('PII_DB_PATH', 'pii_results.db')
-    
-    return jsonify({
-        'status': 'success',
-        'db_path': db_path,
-        'auth_required': password_required,
-        'server_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    })
-
 @app.route('/static/<path:path>')
 def send_static(path):
     """Serve static files"""
     return send_from_directory(app.static_folder, path)
+
+@app.route('/api/test_error_analysis')
+def api_test_error_analysis():
+    """Test endpoint to run error analysis parsing directly on a database file"""
+    db_path = request.args.get('db_path', os.environ.get('PII_DB_PATH', 'pii_results.db'))
+    
+    try:
+        # Connect to database
+        logger.info(f"Testing error analysis on database: {db_path}")
+        db = get_database(db_path)
+        
+        # Create a custom connection with row factory
+        conn = db.conn
+        
+        # Capture stdout to get the text output
+        import io
+        from contextlib import redirect_stdout
+        
+        with io.StringIO() as buf, redirect_stdout(buf):
+            inspect_db.analyze_error_files(conn)
+            raw_output = buf.getvalue()
+        
+        # Parse the output
+        parsed_data = parse_error_analysis_output(raw_output)
+        
+        # Add line-by-line parsing information for debugging
+        lines = raw_output.split('\n')
+        lines_with_type = []
+        
+        for i, line in enumerate(lines):
+            line_type = "unknown"
+            if not line.strip():
+                line_type = "blank"
+            elif "Total error files:" in line:
+                line_type = "total_count"
+            elif "Error Categories:" in line:
+                line_type = "category_header"
+            elif "File Extensions with Errors:" in line:
+                line_type = "extension_header"
+            elif "Sample Error Messages by Category:" in line:
+                line_type = "samples_header"
+            elif line.strip().startswith("  "):
+                if ":" in line:
+                    # Is this a category or extension line?
+                    value_part = line.split(":", 1)[1].strip() if ":" in line else ""
+                    if " (" in value_part and ")" in value_part:
+                        # Look at surrounding context to determine type
+                        context_before = "\n".join(lines[max(0, i-10):i])
+                        if "Error Categories:" in context_before and "File Extensions with Errors:" not in context_before:
+                            line_type = "category_line"
+                        elif "File Extensions with Errors:" in context_before:
+                            line_type = "extension_line"
+                elif line.strip().endswith(":") and not line.strip().startswith("    "):
+                    line_type = "sample_category"
+            
+            lines_with_type.append({
+                "line_num": i+1,
+                "content": line,
+                "type": line_type
+            })
+        
+        # Return detailed debugging information
+        return jsonify({
+            'status': 'success',
+            'db_path': db_path,
+            'raw_output': raw_output,
+            'parsed_data': parsed_data,
+            'total_lines': len(lines),
+            'parsing_details': lines_with_type,
+            'categories_count': len(parsed_data['categories']),
+            'extensions_count': len(parsed_data['extensions']),
+            'samples_count': len(parsed_data['samples'])
+        })
+    except Exception as e:
+        logger.error(f"Error testing error analysis: {str(e)}", exc_info=True)
+        return jsonify({
+            'error': str(e),
+            'status': 'error'
+        }), 500
 
 def parse_args():
     """Parse command line arguments"""

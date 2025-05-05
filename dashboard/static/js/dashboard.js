@@ -565,10 +565,12 @@ function loadErrorAnalysis() {
     elements.errorAnalysisContent.classList.add('d-none');
     
     // Fetch error analysis data
-    let url = '/api/error_analysis';
+    let url = '/api/error_analysis_direct';  // Changed to use our direct endpoint
     if (dbPath) {
         url += `?db_path=${encodeURIComponent(dbPath)}`;
     }
+    
+    console.log("Fetching error analysis from:", url);
     
     fetch(url, getRequestOptions())
         .then(response => {
@@ -581,10 +583,15 @@ function loadErrorAnalysis() {
             return response.json();
         })
         .then(data => {
-            // Log the response for debugging
-            console.log("Error analysis API response:", data);
+            // Log the entire response for debugging
+            console.log("FULL Error analysis API response:", JSON.stringify(data, null, 2));
             
             if (data.status === 'success' && data.error_analysis) {
+                // Add direct full dump to console
+                console.log("Categories:", data.error_analysis.categories);
+                console.log("Extensions:", data.error_analysis.extensions);
+                console.log("Samples:", Object.keys(data.error_analysis.samples));
+                
                 updateErrorAnalysis(data.error_analysis);
                 elements.errorAnalysisLoading.classList.add('d-none');
                 elements.errorAnalysisContent.classList.remove('d-none');
@@ -644,11 +651,13 @@ function updateErrorCategoriesChart(categories) {
     // Verify we have valid categories
     if (!categories || !Array.isArray(categories) || categories.length === 0) {
         console.error("Invalid categories data for chart:", categories);
+        document.getElementById('errorCategoriesChart').parentNode.innerHTML = 
+            '<div class="alert alert-warning">No error category data available. The parsing may have failed.</div>';
         return;
     }
     
     // Debug output
-    console.log("Rendering error categories chart with data:", categories);
+    console.log("Raw error categories data:", categories);
     
     // Prepare data
     const labels = [];
@@ -658,18 +667,30 @@ function updateErrorCategoriesChart(categories) {
         '#6f42c1', '#5a5c69', '#858796', '#f8f9fc', '#d1d3e2'
     ];
     
+    // Validate each category
+    let validCategoriesCount = 0;
+    
     categories.forEach((category, index) => {
-        if (category && category.name && category.count !== undefined) {
+        if (category && typeof category === 'object' && category.name && category.count !== undefined) {
             labels.push(category.name);
             data.push(category.count);
+            validCategoriesCount++;
+        } else {
+            console.warn(`Invalid category data at index ${index}:`, category);
         }
     });
     
     // If we have no valid data after filtering, exit
-    if (labels.length === 0 || data.length === 0) {
+    if (validCategoriesCount === 0) {
         console.error("No valid category data after processing");
+        document.getElementById('errorCategoriesChart').parentNode.innerHTML = 
+            '<div class="alert alert-warning">Could not find valid error category data. Check the server logs.</div>';
         return;
     }
+    
+    console.log(`Rendering error categories chart with ${validCategoriesCount} valid categories`);
+    console.log("Chart labels:", labels);
+    console.log("Chart data:", data);
     
     // Destroy existing chart if it exists
     if (charts.errorCategories) {
@@ -677,52 +698,58 @@ function updateErrorCategoriesChart(categories) {
     }
     
     // Create chart
-    charts.errorCategories = new Chart(ctx, {
-        type: 'pie',
-        data: {
-            labels: labels,
-            datasets: [{
-                data: data,
-                backgroundColor: colors.slice(0, labels.length),
-                hoverBackgroundColor: colors.slice(0, labels.length).map(color => lightenColor(color, 10)),
-                hoverBorderColor: "rgba(234, 236, 244, 1)",
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: {
-                    position: 'right',
-                    labels: {
-                        font: {
-                            size: 12
+    try {
+        charts.errorCategories = new Chart(ctx, {
+            type: 'pie',
+            data: {
+                labels: labels,
+                datasets: [{
+                    data: data,
+                    backgroundColor: colors.slice(0, labels.length),
+                    hoverBackgroundColor: colors.slice(0, labels.length).map(color => lightenColor(color, 10)),
+                    hoverBorderColor: "rgba(234, 236, 244, 1)",
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'right',
+                        labels: {
+                            font: {
+                                size: 12
+                            }
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: "rgb(0, 0, 0, 0.8)",
+                        titleFont: {
+                            size: 14
+                        },
+                        bodyFont: {
+                            size: 14
+                        },
+                        callbacks: {
+                            label: function(context) {
+                                const label = context.label || '';
+                                const value = context.parsed || 0;
+                                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                const percentage = total > 0 ? Math.round((value / total) * 100) : 0;
+                                return `${label}: ${value.toLocaleString()} (${percentage}%)`;
+                            }
                         }
                     }
                 },
-                tooltip: {
-                    backgroundColor: "rgb(0, 0, 0, 0.8)",
-                    titleFont: {
-                        size: 14
-                    },
-                    bodyFont: {
-                        size: 14
-                    },
-                    callbacks: {
-                        label: function(context) {
-                            const label = context.label || '';
-                            const value = context.parsed || 0;
-                            const total = context.dataset.data.reduce((a, b) => a + b, 0);
-                            const percentage = total > 0 ? Math.round((value / total) * 100) : 0;
-                            return `${label}: ${value.toLocaleString()} (${percentage}%)`;
-                        }
-                    }
-                }
-            },
-            cutout: '60%',
-            borderWidth: 0
-        }
-    });
+                cutout: '60%',
+                borderWidth: 0
+            }
+        });
+    } catch (error) {
+        console.error("Error creating error categories chart:", error);
+        document.getElementById('errorCategoriesChart').parentNode.innerHTML = 
+            `<div class="alert alert-danger">Error creating chart: ${error.message}</div>`;
+    }
 }
 
 // Update error extensions chart
@@ -732,11 +759,13 @@ function updateErrorExtensionsChart(extensions) {
     // Verify we have valid extensions
     if (!extensions || !Array.isArray(extensions) || extensions.length === 0) {
         console.error("Invalid extensions data for chart:", extensions);
+        document.getElementById('errorExtensionsChart').parentNode.innerHTML = 
+            '<div class="alert alert-warning">No error extensions data available. The parsing may have failed.</div>';
         return;
     }
     
     // Debug output
-    console.log("Rendering error extensions chart with data:", extensions);
+    console.log("Raw error extensions data:", extensions);
     
     // Prepare data
     const labels = [];
@@ -750,7 +779,17 @@ function updateErrorExtensionsChart(extensions) {
     extensions.sort((a, b) => b.count - a.count);
     
     // Take top 10 extensions with valid data
-    let validExtensions = extensions.filter(ext => ext && ext.extension && ext.count !== undefined);
+    let validExtensions = extensions.filter(ext => ext && typeof ext === 'object' && ext.extension && ext.count !== undefined);
+    
+    console.log(`Found ${validExtensions.length} valid extensions out of ${extensions.length} total`);
+    
+    if (validExtensions.length === 0) {
+        console.error("No valid extension data after filtering");
+        document.getElementById('errorExtensionsChart').parentNode.innerHTML = 
+            '<div class="alert alert-warning">Could not find valid extension data. Check the server logs.</div>';
+        return;
+    }
+    
     const topExtensions = validExtensions.slice(0, 10);
     
     topExtensions.forEach((ext, index) => {
@@ -758,11 +797,9 @@ function updateErrorExtensionsChart(extensions) {
         data.push(ext.count);
     });
     
-    // If we have no valid data after filtering, exit
-    if (labels.length === 0 || data.length === 0) {
-        console.error("No valid extension data after processing");
-        return;
-    }
+    console.log(`Rendering error extensions chart with ${topExtensions.length} valid extensions`);
+    console.log("Chart labels:", labels);
+    console.log("Chart data:", data);
     
     // Destroy existing chart if it exists
     if (charts.errorExtensions) {
@@ -770,45 +807,51 @@ function updateErrorExtensionsChart(extensions) {
     }
     
     // Create chart
-    charts.errorExtensions = new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: labels,
-            datasets: [{
-                label: 'Error Count',
-                data: data,
-                backgroundColor: colors.slice(0, labels.length),
-                borderWidth: 0
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            indexAxis: 'y',
-            scales: {
-                x: {
-                    beginAtZero: true,
-                    ticks: {
-                        precision: 0
-                    }
-                }
+    try {
+        charts.errorExtensions = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Error Count',
+                    data: data,
+                    backgroundColor: colors.slice(0, labels.length),
+                    borderWidth: 0
+                }]
             },
-            plugins: {
-                legend: {
-                    display: false
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                indexAxis: 'y',
+                scales: {
+                    x: {
+                        beginAtZero: true,
+                        ticks: {
+                            precision: 0
+                        }
+                    }
                 },
-                tooltip: {
-                    backgroundColor: "rgb(0, 0, 0, 0.8)",
-                    titleFont: {
-                        size: 14
+                plugins: {
+                    legend: {
+                        display: false
                     },
-                    bodyFont: {
-                        size: 14
+                    tooltip: {
+                        backgroundColor: "rgb(0, 0, 0, 0.8)",
+                        titleFont: {
+                            size: 14
+                        },
+                        bodyFont: {
+                            size: 14
+                        }
                     }
                 }
             }
-        }
-    });
+        });
+    } catch (error) {
+        console.error("Error creating error extensions chart:", error);
+        document.getElementById('errorExtensionsChart').parentNode.innerHTML = 
+            `<div class="alert alert-danger">Error creating chart: ${error.message}</div>`;
+    }
 }
 
 // Update error samples accordion
