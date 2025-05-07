@@ -220,16 +220,18 @@ def analyze_pii_database(db_path, job_id=None, threshold=HIGH_CONFIDENCE_THRESHO
             confidence = entity.get('score', 0.0)
             text = entity.get('text', '')
             
-            # Add to entity set for breach trigger evaluation
-            file_entity_sets[file_path].add(entity_type)
-            
-            # Store all entities (not just sensitive ones) for reporting
-            high_risk_files[file_path].append({
-                'type': entity_type,
-                'category': ENTITY_DISPLAY_NAMES.get(entity_type, entity_type),
-                'confidence': confidence,
-                'text': text
-            })
+            # Only add entities that meet the threshold
+            if confidence >= threshold:
+                # Add to entity set for breach trigger evaluation
+                file_entity_sets[file_path].add(entity_type)
+                
+                # Store all entities (not just sensitive ones) for reporting
+                high_risk_files[file_path].append({
+                    'type': entity_type,
+                    'category': ENTITY_DISPLAY_NAMES.get(entity_type, entity_type),
+                    'confidence': confidence,
+                    'text': text
+                })
     
     # Filter to only files that trigger breach notification
     breach_files = {}
